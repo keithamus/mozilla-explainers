@@ -18,6 +18,11 @@ Oldest first:
 * [Standard Measures with U.S. English](standard-measures-en-us.md)
 * [Web API for Messaging Layer Security (MLS)](MessagingLayerSecurity.md)
 * [Trusted or Sanitized HTML](trusted-or-sanitized-html.md)
+* [JSON form encoding](form-json-encoding.md)
+* [FormValidation](form-validation.md)
+* [Conditional submission disabling](form-disabled-while-submitting.md)
+* [Promise-backed form submission state](form-submission-state.md)
+* [Validation error element](form-error-element.md)
 * ...
 
 ## Feedback on Explainers
