@@ -2,44 +2,45 @@
 
 Author: [Keith Cirkel]
 
+## Summary
+
+Disable a button while its form is submitting, without script to toggle it.
+Its name and value still reach the server.
+
+```html
+<form method="post" action="/checkout">
+  <button name="action" value="pay" disabled="while-submitting">Pay</button>
+</form>
+```
+
+The same keyword works on fields, fieldsets and whole forms. Controls re-enable
+when native submission and any [registered promises][submission lifetime] have
+finished.
+
 ## User problems to be solved
 
-A user who presses a submit button and sees nothing change will often press it
-again. Slow networks, slow servers and script handlers that wait on `fetch()`
-all leave a gap between the press and any visible result. During that gap the
-form looks idle and stays fully interactive, so a second press starts a second
-submission. At best that is harmless. At worst it means a duplicate order or
-payment, or a second request that races the first and leaves the page in a
-confusing state.
+A form that looks idle during a slow submission invites another press, risking
+duplicate requests or orders. Authors disable buttons, and sometimes fields,
+but must handle:
 
-Authors fix this by disabling the submit button, or the fields as well so the
-user cannot edit values while they are being saved. Doing that correctly takes
-more script than it appears to:
-
-1. **Controls must be disabled at the right moment.** Disabling them in a
-   `click` handler runs before [form submission][form submission algorithm]
-   has collected the form's entries. A [disabled][concept-fe-disabled]
-   control is skipped, so its `name` and `value` disappear from the payload.
-   Servers that branch on which button was pressed ("Save draft" versus
-   "Publish") then receive the wrong request. Disabling a fieldset can omit
-   the whole group of fields.
-2. **Controls must be re-enabled at the right moment.** Script has to know
-   when the work has finished, including failures, and restore the previous
-   state without overwriting a `disabled` that something else set.
-3. **Native completion is not exposed to page script.** A native submission may
-   replace the document, return no content, start a download, or target another
-   browsing context. There is no form completion event covering these cases.
-4. **Associated controls need the same treatment.** Controls outside the form
-   that use the [`form` attribute], several submit buttons, and a "Cancel"
-   button that must stay usable all need individual handling.
+1. **Timing.** Disabling in `click` happens before [form submission][form
+   submission algorithm] collects entries. [Disabled][concept-fe-disabled]
+   controls are skipped, losing the submitter's `name` and `value` or a whole
+   fieldset's values.
+2. **Restoration.** Controls must re-enable after completion or failure without
+   overwriting an independently set `disabled`.
+3. **Native completion.** No form completion event covers navigation, downloads,
+   no-content responses and submissions targeting other contexts.
+4. **Associated controls.** External controls using the [`form` attribute],
+   multiple submitters and buttons that must stay usable need individual
+   handling.
 
 ## Methodology for approaching & evaluating solutions
 
-Follow the Mozilla [Web Vision]'s preference for declarative features. The
-native case should work without script, and script should extend the same
-model. Preserve the submitted payload and existing unconditional disabling.
-Evaluate the compatibility cost of extending a boolean attribute explicitly;
-this spelling does not provide a usable fallback in unsupported browsers.
+Follow the Mozilla [Web Vision]'s preference for declarative features. Support
+native submission without script and extend the same model to script. Preserve
+payloads and unconditional disabling, and assess compatibility with a boolean
+attribute whose new value has no usable fallback.
 
 ## Prior features and proposals
 
@@ -52,72 +53,48 @@ this spelling does not provide a usable fallback in unsupported browsers.
 
 ## Flaws or limitations in existing features/proposals
 
-Script-driven disabling can omit controls from the payload and must be
-repeated per page or component. It does nothing for forms without script.
-Framework helpers can render their state into the DOM, but do not establish a
-shared native lifetime for work registered by independent callers.
+Script-driven disabling risks omitting values and must be repeated per
+component. Framework helpers provide no shared native lifetime for independent
+callers, and neither approach works without script.
 
 ## Motivation for this explainer
 
-The browser already knows when a native submission starts, what the submitter
-was, and when the payload has been built. It is in the right place to apply
-a busy state after the payload is captured and to clear it when the form's
-[submission lifetime] ends. A keyword on the existing attribute lets authors
-request disabled interaction while work is pending, without writing a script
-to toggle controls for a native submission.
+The browser can disable controls after capturing the payload and restore them
+when the [submission lifetime] ends. A keyword would make this declarative.
 
 ## Proposed solution
 
 Add a keyword value to the `disabled` attribute on `<button>`, `<input>`,
-`<select>`, `<textarea>` and `<fieldset>`, and add `disabled` to `<form>`:
+`<select>`, `<textarea>` and `<fieldset>`, and add `disabled` to `<form>`.
 
-```html
-<button disabled="while-submitting">Pay</button>
-```
+A control with `disabled="while-submitting"` is disabled only while its form
+owner is submitting, including when associated through the [`form` attribute].
+Without a form owner, the keyword alone does not disable it.
 
-A control with `disabled="while-submitting"` is enabled while its form owner
-is idle, and disabled while its form owner is submitting. This includes text
-inputs, checkboxes and input-based submitters. The form owner is resolved as
-usual, so a control associated through the [`form` attribute] follows the form
-it names, not its tree position. Without a form owner, the keyword alone does
-not disable it.
+While its form owner is submitting, a `<fieldset>` applies the existing
+descendant disabling rules, including the first-`legend` exception. A `<form>`
+with the keyword disables every owned control while submitting, including
+external controls, without a `legend` exception. Controls owned by another
+form are unaffected.
 
-On a `<fieldset>`, the keyword applies the existing fieldset disabling rules
-while its form owner is submitting, including the first-`legend` exception.
-Its descendant controls need not opt in individually.
+The shared [form submission state explainer][submission lifetime] defines
+submitting as having any pending native submission or promise registered with
+the provisional `form.trackSubmission(promise)` method.
 
-On a `<form>`, the keyword disables all controls owned by that form while it
-is submitting, including controls outside its subtree. Controls owned by
-another form are unaffected. Unlike a fieldset, it has no `legend` exception.
+Conditional disabling applies only after the triggering submission's payload
+has been captured, preserving its controls' values. See
+[preserving the submission entry list] for native and scripted ordering.
 
-When a form is submitting is defined in the shared
-[form submission state explainer][submission lifetime]. In short, the form is
-submitting while any native submission or any promise registered with the
-provisional `form.trackSubmission(promise)` method is pending, and stops once
-all of them have settled. This explainer does not repeat that algorithm.
+Other `disabled` values, including the empty string, mean unconditional
+disabling on controls, fieldsets and forms. Ordinary or inherited disabling
+takes precedence over a control's own keyword condition.
 
-The ordering matters for the payload. When submission begins, the browser
-builds the payload with all eligible controls included, as described in
-[preserving the submission entry list], and only then applies the disabled
-state. Conditionally disabling an input, fieldset or form must not remove its
-values from the submission that caused the state change.
+Controls without the keyword remain usable unless disabled through their
+fieldset or form. To keep Cancel usable, leave it outside the disabled group
+and keep the form enabled. Cancellation itself still requires author code.
 
-Any other value of `disabled`, including the empty string, means
-unconditionally disabled. This preserves existing behaviour on controls and
-fieldsets, and gives the new form attribute an unconditional form-wide mode.
-Ordinary disabling takes precedence over the keyword. A control inside a
-disabled fieldset or owned by a disabled form stays disabled even if its own
-keyword condition is false.
-
-Controls without the keyword are unaffected unless disabled through a fieldset
-or their form. A "Cancel" or "Back" button can remain usable by leaving it
-outside the disabled group and keeping the form itself enabled. Nothing in
-this proposal cancels a submission; any cancel behaviour is the author's own
-code.
-
-An attempt that fails interactive validation adds no new pending work. It
-does not conditionally disable an idle form's controls; existing pending work,
-if any, is unaffected.
+Failed interactive validation adds no pending work, leaving an idle form's
+controls enabled and any existing work unaffected.
 
 ## Examples
 
@@ -209,16 +186,10 @@ capturing their entries. No control needs its own conditional attribute.
 
 ### Script-driven submission
 
-The complete [scripted example](form-submission-state.md#replacing-native-submission)
-captures `new FormData(form, event.submitter)`, explicitly calls
-`preventDefault()`, and registers its request and response processing through
-the provisional `trackSubmission()` method. Cancelling the default action
-completes the native contribution, while the registered promise keeps the form
-submitting.
-
-Several promises can be tracked for one form. The opted-in controls and groups
-stay disabled until every one has settled, and a rejected promise does not end
-the busy state early.
+The [scripted example](form-submission-state.md#replacing-native-submission)
+captures `new FormData(form, event.submitter)`, cancels native submission and
+registers the request and response processing with `trackSubmission()`.
+Controls stay disabled until every contribution settles, even after a rejection.
 
 ### Styling
 
@@ -228,100 +199,64 @@ the busy state early.
 }
 ```
 
-`:disabled` matches opted-in controls, fieldsets and forms while submitting,
-and controls disabled through a fieldset or form. It stops matching once they
-are no longer disabled.
+`:disabled` matches effectively disabled controls, fieldsets and forms,
+including controls disabled through a fieldset or form.
 
 ## Caveats, shortcomings, and other drawbacks of design choices
 
-**Old browsers disable opted-in controls permanently.** A browser without this
-feature reads `disabled="while-submitting"` as a plain boolean `disabled` on
-controls and fieldsets. On a form, it ignores the attribute instead, leaving
-the controls usable without protection. Authors who need to support those
-browsers must feature-detect and remove or rewrite the attribute, which means
-script. We considered a separate attribute, which would fall back to enabled
-controls, and rejected it in favour of extending `disabled`.
+**Unsupported browsers.** They treat the keyword as unconditional disabling on
+controls and fieldsets, but ignore it on forms. Authors must feature-detect and
+remove or rewrite it in script. A separate attribute would fall back to enabled
+controls; we rejected it in favour of extending `disabled`.
 
-**Existing content may already use the value.** Pages that today write
-`disabled="while-submitting"` (or generate it from a template) get permanently
-disabled controls now and would get conditionally enabled controls after this
-change. Adding meaning to `disabled` on forms also affects existing uses of
-that attribute. Compatibility needs investigation before shipping.
+**Compatibility.** Existing `disabled="while-submitting"` controls would change
+from permanently to conditionally disabled. Both this and giving `disabled`
+meaning on forms need compatibility investigation before shipping.
 
-**No exactly-once guarantee.** Disabling controls prevents interaction with
-those controls. It does not stop [implicit submission] through controls that
-remain enabled, calls to `form.submit()` or
-`requestSubmit()`, another tab, a retrying proxy, or a user reloading. Servers
-that must not process a request twice still need idempotency keys or similar.
+**No submission lock.** Disabling prevents interaction, not [implicit
+submission] through enabled controls, programmatic submission, retries or
+requests from other tabs. Servers still need idempotency keys or similar
+protection against duplicates.
 
-**Completion of native submissions.** A navigating submission normally ends
-when the document is replaced, so the disabled state does not need clearing.
-When the navigation does not replace the document (a `204 No Content`
-response, a download, a submission targeting another browsing context, or a
-navigation that is cancelled or fails), the submission lifetime must still
-end and the conditionally disabled controls must re-enable. The shared
-explainer records these completion hooks as open questions.
-
-**Back/forward cache restoration.** A restored page must not retain stale
-native submission state. Unconditionally resetting every form to idle would
-also clear still-pending registered promises, so telling obsolete work apart
-from them is a shared lifecycle question.
-
-**Disabling a form is not a submission lock.** It disables its controls, but
-does not prevent programmatic submissions or cancel work automatically.
-Authors who need a usable Cancel button should disable a fieldset or individual
-controls instead.
+**Native completion and restoration.** No-navigation responses, downloads,
+other targets and cancelled or failed navigation must release disabled state.
+Restored pages must discard obsolete native work without clearing still-pending
+promises. These hooks remain open in the shared explainer.
 
 ## Open questions
 
-1. **Method name.** `trackSubmission(promise)` is a working name used across
-   these explainers. The final name is not settled.
-2. **`.disabled` reflection.** On existing elements, `.disabled` reflects the
-   attribute as a boolean, so it returns `true` for
-   `disabled="while-submitting"` even while the element is usable. Should it
-   keep reflecting the attribute, or report the current state? Keeping
-   reflection means script must use `matches(":disabled")` to learn the
-   current state. Setting `.disabled = false` would also remove the keyword.
-   Should the new form attribute have the same boolean reflection?
-3. **`:disabled` and accessibility.** We propose that `:disabled` and the
-   accessibility tree follow the current state, not the attribute. Whether
-   assistive technology should also announce that the form is busy (for
-   example through `aria-busy` on the form) is open.
-4. **A `:submitting` pseudo-class.** A selector for the form's state would let
-   authors style content independently of disabling it. It is not part of this
-   proposal and is left open.
-5. **Feature detection.** Is there a clean way to detect support, so authors
-   can strip the attribute in old browsers, without parsing the attribute
-   value through a new IDL attribute?
+1. **Method name.** `trackSubmission(promise)` remains provisional.
+2. **`.disabled` reflection.** Boolean reflection returns `true` for the keyword
+   even while the control is usable; `matches(":disabled")` gives its effective
+   state. Should reflection change, and should forms use the same model?
+   Setting `.disabled = false` would remove the keyword.
+3. **Accessibility.** `:disabled` and the accessibility tree would follow the
+   effective state. Should assistive technology also announce form busy state,
+   for example through `aria-busy`?
+4. **`:submitting`.** Should a separate pseudo-class expose pending state for
+   styling? It is not part of this proposal.
+5. **Feature detection.** Can support be detected without a new IDL attribute
+   for parsing the value?
 
 ## Draft specification
 
-Proposed changes to the HTML Standard, as an outline:
+1. Define ASCII case-insensitive `while-submitting` in
+   [the `disabled` attribute][attr-fe-disabled] on `button`, `input`, `select`,
+   `textarea` and `fieldset`. Add `disabled` to `form` with the same keyword;
+   other values disable unconditionally.
+2. Extend [disabled][concept-fe-disabled] to apply the keyword while the form
+   owner is submitting, retaining fieldset rules. Forms with the keyword disable
+   all owned controls while submitting. Ordinary and inherited disabling apply
+   independently.
+3. Make `:disabled` and accessibility reflect effective state on controls,
+   fieldsets and forms.
+4. In the [form submission algorithm], mark native work pending after entry
+   capture, then apply conditional disabling as defined in
+   [preserving the submission entry list].
 
-1. In [the `disabled` attribute][attr-fe-disabled], define the keyword
-   `while-submitting`, matched ASCII case-insensitively, for `button`, `input`,
-   `select`, `textarea` and `fieldset`. Add `disabled` to `form`, accepting the
-   same keyword and treating other values as unconditional disabling.
-2. In the definition of [disabled][concept-fe-disabled] for form controls,
-   make the keyword itself disable a control only while it has a submitting
-   form owner, as defined in [submission lifetime]. Apply the same condition
-   to fieldsets using their existing descendant and first-`legend` rules.
-   A disabled form disables every control it owns, including external
-   controls. Non-keyword disabling and inherited disabling apply independently
-   of a control's own keyword condition.
-3. Make `:disabled` and the accessibility tree reflect the effective state of
-   controls, fieldsets and forms.
-4. In the [form submission algorithm], after the entry list is constructed
-   with all eligible controls, mark the form as having a pending native
-   submission as described in [preserving the submission entry list]. The
-   disabled state then applies through step 2 without further changes here.
-5. Failed validation creates no new native contribution. Cancelling `submit`
-   completes its native contribution without clearing registered promises.
-6. Resolve the shared native completion and restoration hooks before defining
-   their effect on conditional disabling normatively.
-
-The submission lifetime, `trackSubmission()` and the native contribution rules
-are specified by the shared explainer, not here.
+The shared explainer defines pending contributions, failed validation and
+cancellation. Native completion and restoration hooks must be resolved before
+their effect on disabling becomes normative.
 
 ## Incubation and/or standardization destination
 

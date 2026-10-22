@@ -2,37 +2,46 @@
 
 Author: [Keith Cirkel]
 
+## Summary
+
+Submit typed, nested JSON from an HTML form without replacing native submission
+with script.
+
+```html
+<form method="post" action="/pets" enctype="application/json">
+  <label>Name <input name="pet[name]" value="Hypatia"></label>
+  <label>Legs <input name="pet[legs]" type="number" value="4"></label>
+  <button>Save</button>
+</form>
+```
+
+The request body is:
+
+```json
+{"pet":{"name":"Hypatia","legs":4}}
+```
+
+`FormData` exposes the same conversion through `data.toJSON()` and
+`FormData.fromJSON(value)`. Use `enctype="multipart/json"` to include file
+contents alongside the JSON. Cross-origin submissions require server opt-in
+through CORS preflight.
+
 ## User problems to be solved
 
-Most modern HTTP APIs have settled on JSON as the format for request bodies, but
-HTML forms can only submit:
+HTML forms support `application/x-www-form-urlencoded`, `multipart/form-data`
+and `text/plain`, but many APIs expect typed, nested JSON described by OpenAPI
+or JSON Schema.
 
-- `application/x-www-form-urlencoded`,
-- `multipart/form-data`, or
-- `text/plain`.
-
-Existing encodings provide neither typed values nor nested structure. To match
-APIs described by OpenAPI or JSON Schema (the prevailing systems for building
-server side APIs), authors must reshape form data in script or reconstruct it
-on the server.
-
-To send a form to a JSON endpoint, authors have to intercept the `submit` event
-in script, build a `FormData`, convert it to an object by hand, serialise it,
-and send it with `fetch()`. This loses what a declarative form gives for free.
-It no longer works without script, and the browser no longer handles
-navigation, history, the response document, or back/forward behaviour.
-Rebuilding that by hand means rendering the response yourself and restoring
-pages on `popstate`, and even then the new page's scripts don't run, there is
-no loading indicator or stop button, and scroll and focus have to be reset by
-hand. Every site also ends up re-implementing the same conversion slightly
-differently, for example in how repeated names are handled.
+Authors must intercept `submit`, convert `FormData` to an object, serialise it
+and send it with `fetch()`. This requires script and replaces native navigation,
+history, response rendering and back/forward handling. Restoring those also
+means handling `popstate`, page scripts, loading and cancellation UI, scroll
+and focus. Sites separately reimplement conversion rules such as repeated names.
 
 ### Evidence of demand
 
-The obvious conversion, `Object.fromEntries(formData)`, is lossy. `FormData` can
-hold several entries with the same name, from a `<select multiple>` or a group
-of checkboxes, but an object has one value per key, so `fromEntries()` keeps
-only the last:
+`Object.fromEntries(formData)` keeps only the last value for each name, losing
+repeated checkbox or `<select multiple>` values:
 
 ```html
 <input type="checkbox" name="tag" value="magic" checked />
@@ -43,10 +52,8 @@ only the last:
 Object.fromEntries(new FormData(form)); // { tag: "horns" }
 ```
 
-Code that wants to avoid losing data has to consult a schema, call
-`getAll()` for every name, or turn a value into an array when a second entry
-appears. Frameworks either recommend lossy `fromEntries`, leave this to
-userland, or reinvent it:
+Preserving values requires a schema, `getAll()` or collecting repeated entries.
+Framework approaches differ:
 
 - **Next.js**: the official App Router tutorial ([Learn, chapter 11]) recommends
   the lossy idiom without mentioning repeated names: "If you're working with
@@ -64,8 +71,7 @@ userland, or reinvent it:
   `formToObj()` had a critical prototype pollution vulnerability
   ([CVE-2026-25150]) in its nesting code.
 
-The same two checkboxes give different results depending on the approach, and
-most approaches change a field's type when only one box is ticked:
+The same checkboxes produce different values and types:
 
 | Approach                                                                        | Both ticked         | Only `magic` ticked |
 | ------------------------------------------------------------------------------- | ------------------- | ------------------- |
@@ -79,34 +85,23 @@ Hono, like PHP, Rails and qs, always returns an array for a name ending in
 
 ## Methodology for approaching & evaluating solutions
 
-- Advance the [Declarative Web]. A plain `<form>` should be able to talk to a
-  JSON endpoint with no script.
-- Do not expand the attack surface. Servers widely assume that a request with
-  `Content-Type: application/json` can't come from a cross-origin form, and many
-  rely on that for CSRF protection. A solution must keep that assumption true
-  unless the server explicitly opts in.
-- Reuse existing platform primitives (the `enctype`/`formenctype` attributes,
-  the form entry list, `FormData`, CORS) rather than inventing parallel ones.
-- Follow the naming conventions servers already parse, so that a browser without
-  support falls back to a body those servers decode to the same shape.
-- Have exactly one JSON representation of form data on the platform, shared by
-  declarative submission and script.
-- Layer the solution, following the [Extensible Web Manifesto]. The conversion
-  should be a primitive that is useful on its own and that authors can compose
-  in script, and the declarative feature should be built on top of it.
+- Support script-free JSON submission, following the [Declarative Web].
+- Preserve CSRF protection based on cross-origin forms being unable to send
+  `Content-Type: application/json`; require explicit server opt-in.
+- Reuse `enctype`/`formenctype`, form entries, `FormData` and CORS.
+- Follow server naming conventions for compatible fallback.
+- Share one JSON representation between script and declarative submission.
+- Expose conversion first, then build declarative submission on it, following
+  the [Extensible Web Manifesto].
 
 ## Prior features and proposals
 
 - [W3C HTML JSON form submission] (Working Group Note, 2015) proposed
-  `enctype="application/json"` with a path syntax in control names
-  (`name="pet[0][species]"`) that builds nested objects and arrays, and
-  base64-encoded file contents. It was published as a Note and not pursued
-  further. Its path algorithm has costly edge cases. Sparse indices are filled
-  with `null`, so `kids[999999999]` builds a billion-element array, and
-  conflicting paths are merged into objects with `""` and index keys. Its
-  examples show numbers and booleans (`"shiny": true`, `[1, 2, 3]`), but its
-  algorithm only ever produces strings. It also forced same-origin requests, so
-  it could never reach a cross-origin API, even with the server's consent.
+  `enctype="application/json"`, bracket paths such as `pet[0][species]` and
+  base64 files. It was not pursued. Its algorithm pads sparse arrays with
+  `null` (`kids[999999999]` creates a billion entries), merges conflicts using
+  `""` and index keys, and produces strings despite typed examples. It also
+  forbids cross-origin requests even with server consent.
 - [whatwg/html#1667] asked for that Note to be brought into HTML. It was closed.
 - [whatwg/xhr#84] considered `FormData.prototype.toJSON()`. It was closed. The
   concerns raised were that `toJSON()` is synchronous while reading `Blob`
@@ -164,9 +159,9 @@ describe nested objects and arrays; control types provide value hints.
   nesting level.
 - Labels are positions. At every array, at every nesting level, the distinct
   labels must be exactly `0` to `n - 1`, in any entry order, so `kids[1]=b` and
-  `kids[0]=a` give `{"kids":["a","b"]}`. A missing position, as in `kids[0]`
-  with `kids[2]`, or a lone large label such as `kids[99999]`, makes conversion
-  throw a `TypeError`. Gaps are never closed or padded, and labels are never
+  `kids[0]=a` give `{"kids":["a","b"]}`. A missing position (`kids[0]` with
+  `kids[2]`) or a lone large label such as `kids[99999]` makes conversion throw
+  a `TypeError`. Gaps are never closed or padded, and labels are never
   renumbered (see [Caveats](#caveats-shortcomings-and-other-drawbacks-of-design-choices)).
 - Other bracket segments are object keys. Quoted segments are always object
   keys, so `pet["0"][name]` gives `{"pet":{"0":{"name":…}}}`. Leading-zero
@@ -189,13 +184,13 @@ describe nested objects and arrays; control types provide value hints.
   alongside `mix[key]`, `tag[]` alongside `tag[0]`, or `tag[0]` alongside
   `tag[a]`, none of them nest. Each is kept whole as a flat key, merging with
   any entry that names that key directly. No value is lost, and whether a name
-  nests doesn't depend on entry order. This replaces the Note's merge rules.
-  A flattened name loses its terminal `[]` meaning too, so a flattened `a[b][]`
+  nests doesn't depend on entry order. This replaces the Note's merge rules. A
+  flattened name loses its terminal `[]` meaning too, so a flattened `a[b][]`
   with one value is a string (see [Empty states](#empty-states)).
 - Density is checked on every name that parses as a path, before conflict
-  flattening, so flattening never rescues a gap, and `t[0]`, `t[2]` alongside
-  `t[a]` still throws. This is an admission rule the draft adopts, not
-  something order independence needs (see [open question 3][open questions]).
+  flattening, so flattening never rescues a gap and `t[0]`, `t[2]` alongside
+  `t[a]` still throws. This is an admission policy, not something order
+  independence needs (see [open question 3][open questions]).
 - A name can have at most a limited number of key and index segments (see
   [open question 2][open questions]); a final `[]` doesn't count. Longer names
   stay flat.
@@ -247,31 +242,31 @@ Thus `name="tag[]"` gives `{"tag":[]}`, not `{"tag":[[]]}`, when nothing is
 selected. Collection handling takes precedence over scalar Boolean handling.
 
 Eligibility uses HTML's normal form-participation rules, except that an
-unchecked checkbox or radio can record an empty state. Disabled controls,
-including controls disabled through a fieldset, unnamed controls and controls
-inside a `datalist` contribute nothing. A selected enabled option with
-`value=""` is an actual value, not an empty collection. An explicitly valued
-unchecked checkbox without a collection name, an unchecked scalar radio and a
-custom element submitting `null` remain absent.
+unchecked checkbox or radio can record an empty state. Disabled controls
+(including through a fieldset), unnamed controls and controls inside a
+`datalist` contribute nothing. A selected enabled option with `value=""` is an
+actual value, not an empty collection. An explicitly valued unchecked checkbox
+without a collection name, an unchecked scalar radio and a custom element
+submitting `null` remain absent.
 
 These contributions are captured with the entry list, before `formdata`.
 `get()`, `getAll()`, `has()`, iteration and existing encodings do not expose
 them. Empty multiple-file inputs with valid terminal `[]` names keep their
 native empty `File` placeholder in that public view, but omit it from JSON and
-`multipart/json` parts. This exclusion uses native no-selection provenance, not
-the file's name or size; script-added files are never mistaken for placeholders.
+`multipart/json` parts. This uses native no-selection provenance, not the
+file's name or size, so script-added files are never mistaken for placeholders.
 
 A Boolean contribution is ignored if an ordinary entry has the same source
-name. `false` is a default for a missing field, not one value per unchecked
-control. For JSON, false contributions with the same exact source name
-coalesce, keeping the first captured, while validation keeps each record.
+name, since `false` is a default for a missing field, not one value per
+unchecked control. For JSON, false contributions with the same exact source
+name coalesce, keeping the first captured, while validation keeps each record.
 Contributions under different source names that parse to the same path, such
 as `draft` and `["draft"]`, are not merged. An empty-list contribution is
 ignored if its target path contains an actual value, a surviving Boolean
-contribution or a more-specific empty-list contribution. Duplicate empty-list
+contribution or a more-specific empty-list contribution; duplicate empty-list
 targets coalesce. Comparisons use parsed paths, not string prefixes. Surviving
-empty states participate in ordinary conflict flattening, which can also
-flatten actual entries. Empty-state-only fields follow actual entries in JSON
+empty states take part in ordinary conflict flattening, which can also flatten
+actual entries, and empty-state-only fields follow actual entries in JSON
 insertion order.
 
 With checkboxes that have no `value` attribute:
@@ -517,15 +512,6 @@ Examples and their canonical names:
 - **Dense array indices that stay flat** when not dense. Positions are
   preserved, but the whole group silently changes shape. The draft throws
   instead.
-- **Density checked only on arrays that survive flattening.** Indexed names
-  that conflict flattening keeps whole would then need no dense labels, so
-  `t[0]`, `t[2]` alongside `t[a]` would give three flat keys instead of
-  throwing. Either check is independent of entry order. The draft checks every
-  parsed indexed path; the choice is [open question 3][open questions].
-- **A non-throwing `toJSON()`** that falls back to another shape, such as
-  dense or object, while submissions stay strict. Generic serialisers would
-  never meet a `TypeError`, but script and submission would no longer share
-  one representation (see [caveats]).
 - **Rack's `p[][a]` rule**, which starts a new element when a key repeats.
   `p[][a]` then `p[][b]` could be one element or two, so it can't round-trip.
 - **Typing inferred from values**, so `"4"` becomes `4`. This breaks values such
@@ -559,11 +545,11 @@ Examples and their canonical names:
    - Each `File` entry follows as an ordinary file part containing the file's
      contents, in JSON traversal order (object key order and array element
      order), not necessarily entry-list order. Its field name is the canonical
-     name of where its file name sits in the JSON. A repeated plain `photo`
-     becomes `photo[]`, numeric labels keep their positions, and contradictory names
-     are quoted. These names describe the draft wire shape; exact association
-     for mixed string/file arrays needs an additional positional reference
-     before a receiver can reconstruct those arrays unambiguously.
+     name of where its file name sits in the JSON: repeated plain `photo`
+     becomes `photo[]`, numeric labels keep their positions, and contradictory
+     names are quoted. These names describe the draft wire shape; mixed
+     string/file arrays need an additional positional reference before a
+     receiver can reconstruct them unambiguously.
    - Non-file entries appear only in the JSON part.
    - `multipart/json` is not a CORS-safelisted `Content-Type`, so cross-origin
      submissions are preflighted exactly as for `application/json`.
@@ -700,34 +686,32 @@ Content-Type: image/png
 ## Caveats, shortcomings, and other drawbacks of design choices
 
 - **`application/json` can't upload files.** File entries appear only as file
-  names. Uploads need `multipart/json` (or `multipart/form-data`). Putting
-  contents in the JSON (for example base64, as the 2015 Note did) would make
-  file data about a third larger. A synchronous `FormData.prototype.toJSON()`
-  can't read file contents, so including them would also mean giving up the
-  shared representation.
-- **`multipart/json` is a new media type.** It needs an IANA registration (the
-  multipart registry has no `json` subtype). Alternatives considered:
+  names. Uploads need `multipart/json` (or `multipart/form-data`). Base64 in
+  the JSON, as the 2015 Note did, would make file data about a third larger,
+  and a synchronous `toJSON()` can't read file contents, so including them
+  would give up the shared representation.
+- **`multipart/json` is a new media type.** It needs an IANA registration, as
+  the multipart registry has no `json` subtype. Alternatives considered:
   - Sending `multipart/form-data` would avoid the preflight, but the `enctype`
     keyword would then name a type that is never sent, unlike every existing
-    keyword. It would also buy little compatibility. An existing parser would
+    keyword. It would buy little compatibility either. An existing parser would
     accept the body, but the app would see its files and an empty-named field,
     and none of its form fields, until it was changed to read the JSON part.
-  - `multipart/form-data+json` would be truthful but misleading, because the
-    `+json` suffix ([RFC 6839]) tells servers the whole body is JSON, which it
-    isn't.
+  - `multipart/form-data+json` would mislead, because the `+json` suffix
+    ([RFC 6839]) tells servers the whole body is JSON, which it isn't.
 
-  `multipart/json` must also never be added to the CORS safelist. That would let
-  any page send it with an arbitrary body via `fetch()` with `mode: "no-cors"`,
-  and servers that match content types loosely would then parse attacker JSON
-  without a preflight, which is the class of bug behind Fastify's
+  `multipart/json` must also never be added to the CORS safelist. Any page
+  could then send it with an arbitrary body via `fetch()` with
+  `mode: "no-cors"`, and servers that match content types loosely would parse
+  attacker JSON without a preflight, the class of bug behind Fastify's
   [CVE-2022-41919].
 
 - **Existing parsers reject `multipart/json`.** busboy, which multer uses,
-  accepts only a `multipart/form-data` type and throws
-  `Unsupported content type` otherwise. This fails loudly rather than silently
-  losing fields, and every server has to change anyway to read the JSON part.
-  The fix is a parser update, or treating `multipart/json` as
-  `multipart/form-data` before parsing, since the part syntax is the same.
+  accepts only `multipart/form-data` and throws `Unsupported content type`
+  otherwise. This fails loudly rather than silently losing fields, and every
+  server has to change anyway to read the JSON part, either by updating the
+  parser or by treating `multipart/json` as `multipart/form-data` before
+  parsing, since the part syntax is the same.
 - **Servers find the JSON part by position.** It is always the first part and
   has an empty field name. Script and form-associated custom elements can also
   add empty-named entries. Their strings appear inside the JSON object, while
@@ -739,149 +723,94 @@ Content-Type: image/png
   that also needs checking.
 - **File parts use canonical names.** Repeated plain `photo` produces `photo[]`
   parts, so lookup by control name can miss files.
-- **Bracket and quote names gain meaning.** Only `toJSON()`, `fromJSON()` and
-  the new keywords read them. Existing encodings and the other `FormData`
-  methods are unchanged. Most existing names with brackets were written for PHP,
-  Rails or qs, which mostly give them the same meaning. Other names that happen
-  to contain brackets will nest, and invalid ones stay flat. Quoted keys
-  (`q["a]b"]`) are new; canonical names use them where a key can't be written bare.
-- **Array labels are positions, and must be dense.** At every array level the
-  labels must be exactly `0` to `n - 1`; otherwise `toJSON()` throws a
-  `TypeError` and an `application/json` or `multipart/json` submission sends
-  no request. We chose this because positions can have different rules, for
-  example `surname[0]` may be required and `surname[1]` optional. Compacting
-  would move `surname[1]` into the required position, and `null` padding
-  collides with the `null` of an empty number input. Keep persistent record IDs
-  in values, or use quoted keys (`pet["7"]`) for an intentionally sparse object
-  keyed by numeric ID. File-part names follow the canonical paths, but those
-  names alone cannot identify positions in mixed string/file arrays; their
-  reference format is still an open question. The check covers every name that
-  parses as an indexed path, before conflict flattening, so `t[0]`, `t[2]`
-  alongside `t[a]` throws even though flattening would keep all three whole.
-  That is an admission policy, not something order independence needs, since
-  checking only the arrays that survive flattening would be independent of
-  entry order too. [Open question 3][open questions] asks which to adopt.
-- **Dense-only rejects some ordinary forms.** Native submissions leave gaps when
-  an optional indexed radio group or an explicit-valued checkbox submits
-  nothing, a row is disabled or removed, a custom element submits `null`, or
-  script changes the entry list. Boolean checkboxes and declared terminal-`[]`
-  groups can retain positions through their existing empty states. A gap makes
-  the new encodings fail outright, though legacy encodings are unaffected.
-  Renumbering is a fix only when positions have no distinct meaning; it isn't
-  a remedy for a skipped fixed question, and the browser never renumbers. The
-  dense-or-object alternative keeps omissions at the cost of a schema accepting
-  both shapes and different validation-name matching.
+- **Names gain meaning.** Only the new methods and keywords parse brackets;
+  other `FormData` methods and encodings are unchanged. PHP, Rails and qs use
+  similar paths, but incidental brackets can now nest and invalid paths stay
+  flat. Quoted keys such as `q["a]b"]` are new and used canonically when needed.
+- **Dense array positions.** Every array level needs labels `0` to `n - 1`;
+  gaps throw `TypeError` and abort JSON submission before sending. Compaction
+  could move an optional `surname[1]` into required `surname[0]`; padding would
+  conflate gaps with numeric `null`. Store persistent IDs in values or use
+  quoted keys (`pet["7"]`) for sparse objects. Density is checked before
+  conflict flattening ([open question 3][open questions]).
+- **Ordinary forms can leave gaps.** Unanswered indexed radios or explicit-valued
+  checkboxes, disabled or removed rows, custom elements submitting `null` and
+  script mutations can abort JSON conversion. Boolean checkboxes and declared
+  terminal-`[]` groups retain empty states; legacy encodings are unaffected.
+  Renumbering is safe only where positions have no distinct meaning, and the
+  browser never does it.
 
-  An optional scalar radio group is the common case. Radios named `answer[1]`
-  left unanswered between answered `answer[0]` and `answer[2]` leave a gap.
-  Authors have two existing options, and neither is a transparent rename.
-  Naming the group `answer[1][]` keeps the position, because an unchecked
-  terminal-`[]` group records `[]`, but the field becomes a list, `[]` or
-  `["yes"]`; it suits only fields where collection semantics and that group
-  result are acceptable. Quoted numeric keys for every question,
-  `answer["0"]`, `answer["1"]` and so on, give an object that can omit a key.
-  Mixing them with unquoted labels at the same level throws if those labels
-  aren't dense on their own; otherwise the conflict flattens the group. The
-  draft doesn't give unanswered radios a `null` empty state, because `null`
-  already means an empty or invalid number input and the two would collide.
+  For an unanswered `answer[1]` between `answer[0]` and `answer[2]`, naming the
+  group `answer[1][]` preserves the position but changes its value to `[]` or
+  `["yes"]`; use it only where collection semantics fit. Quoting every question
+  key instead gives an object with omissions. Neither is a transparent rename.
+  Mixing quoted and indexed keys throws if the indexed labels alone have gaps;
+  otherwise it flattens the group. Radios have no `null` empty state because
+  that already represents empty or invalid numeric input.
 
-  How a failed submission is surfaced is unsettled. We recommend that, before
-  stage 2 ships, a conversion failure produce at least an author-visible
-  diagnostic such as a console warning, and that a form-level event like
-  `invalid` and accessible feedback for the user be considered. Which of these
-  to add, and their names and details, are undecided ([open question
-  7][open questions]); this draft defines none of them. We want framework,
-  server and browser feedback on these omission workflows, the failure
-  experience and the dense-only versus dense-or-object tradeoff.
-- **A throwing `toJSON()` reaches generic serialisers.** `JSON.stringify()`
-  calls `toJSON()` on a `FormData` wherever it sits in the value, so a logger,
-  error reporter or persistence layer that serialises an object holding a
-  `FormData` with an indexed gap gets a `TypeError` from code that never chose
-  this encoding. A non-throwing `toJSON()`, falling back for example to the
-  dense-or-object shape, with only `application/json` and `multipart/json`
-  submissions strict, would avoid that. It would also split the shared
-  representation this proposal is built on. Script would see one shape while
-  the server received another, or nothing. This needs a decision, not a
-  default ([open question 3][open questions]).
+  Dense-or-object output would allow omissions but require both schema shapes
+  and different validation-name matching. We need framework, server and browser
+  feedback on that tradeoff and the failure experience ([open questions 3 and
+  7][open questions]).
+- **Generic serialisers can throw.** `JSON.stringify()` calls nested
+  `FormData.toJSON()` too, so indexed gaps can break logging, error reporting
+  or persistence that never explicitly chose this encoding. Making `toJSON()`
+  non-throwing while submissions remain strict would split the shared
+  representation. That choice remains [open question 3][open questions].
 - **Numeric brackets differ from Rack.** `pet[1][name]` builds an array here,
   but an object in Rack. PHP and qs also interpret digit brackets as arrays,
   though their handling of sparse and very large labels differs. Quoted keys
   are new syntax, so numeric object keys need server support in the urlencoded
   fallback.
-- **Repeated plain names change type.** Without `[]`, `tag` is a string with one
-  entry and an array with two, as in qs and htmx. Collecting keeps every value,
-  and a schema expecting a string rejects the array loudly, where last-wins
-  would silently drop data. Authors avoid it with `[]`, and conformance checkers
-  could warn when a checkbox group or `<select multiple>` name lacks it.
-- **Native hints remain control-derived.** Hidden inputs and `<select>` stay
-  strings, even for numeric IDs. There is no new markup type-hint attribute.
-  Script and custom elements can supply explicit hints; servers still need
-  coercion where their schemas expect numbers or booleans from these controls.
+- **Repeated names change type.** Plain `tag` is scalar with one entry and an
+  array with two, as in qs and htmx. This preserves values and lets string schemas
+  reject duplicates rather than silently lose them. Use `[]` for stable arrays;
+  conformance checkers could warn on collection names without it.
+- **Hints are control-derived.** Hidden inputs and selects remain strings.
+  There is no markup hint attribute; script and custom elements can supply
+  hints. Servers may still need coercion for numeric IDs or booleans.
 - **Numbers have double precision.** As with `valueAsNumber`,
   `<input type=number value=12345678901234567890>` gives `12345678901234567000`,
   so number inputs shouldn't hold IDs that require exact decimal digits.
-- **Empty states need a participating control.** JSON includes `false` for an
-  eligible unchecked Boolean checkbox and `[]` for an empty declared collection.
-  Disabled or absent controls do not supply defaults. Legacy encodings still
-  omit unchecked controls; servers accepting both formats must account for that
-  difference. Explicitly valued scalar checkboxes still submit selected values
-  rather than Boolean state.
-- **Script can't create empty states.** Only HTML's entry-list construction
-  records JSON-only empty states. A `FormData` passed to `setFormValue()`
-  keeps any it already has, but no method creates one. A custom element
-  or `formdata` handler can give `false` only as a visible entry (`""` with the
-  `"boolean"` hint), which legacy encodings send, and `[]` only through a
-  `FormData.fromJSON()` result, where `{"tags":[]}` is a visible `tags=""`
-  entry. Whether to add an API for script-created empty states, and its shape,
-  is [open question 4][open questions]; none is proposed.
-- **Types follow controls or explicit hints.** Changing `type=text` to
-  `type=number`, or changing a script-supplied hint, changes the JSON type and
-  can break a server contract.
-- **Reading and rewriting entries loses JSON information.** For non-file
-  entries, `get()`, `getAll()` and iteration expose stored strings, not internal
-  JSON values or empty-state contributions. Copying through iteration loses
-  both hints and implicit empty states. `data.set(name, data.get(name))` replaces
-  a typed entry with an untyped one and clears that name's contribution. Script
-  must supply hints again, or, when labels are dense, use
-  `FormData.fromJSON(data.toJSON())`, though that round trip replaces files with
-  names and canonicalises field names. It also materialises JSON-only empty
-  states as ordinary public entries, so `draft: false` becomes a visible
-  `draft=""`, and an empty `tag[]` group becomes `tag=""` with JSON value
-  `[]`. Getters and legacy encodings then expose these entries, and deletion
-  must use their new canonical names.
-- **Nesting needs a limit.** Deep names such as `a[b][c][d]...` cost recursion
-  in the browser and the server. qs stops nesting after 5 levels by default and
-  Rack raises an error at 32. Past some limit, names stay flat, and `fromJSON()`
-  throws on deeper values, because it couldn't give them back. The draft counts
-  key and index segments and doesn't count a final `[]`, both when parsing
-  names and when producing canonical names. Otherwise a name at the limit used
-  twice would give an array whose canonical name, with its added `[]`, exceeds
-  the limit, and `fromJSON()` would reject what `toJSON()` returned. If the
-  limit were 32, for example, a name with 32 keys used twice gives a canonical
-  name with those 32 keys followed by `[]`, which stays within it. Flattening
-  repeated values at the limit is the alternative ([open question
-  2][open questions]).
-- **Schema compatibility still needs checking.** Typed, nested output doesn't
-  meet every OpenAPI or JSON Schema body. Schemas must account for disabled or
-  absent controls, empty number inputs giving `null`, and repeated plain names
-  changing from scalars to arrays. Values that remain strings may need coercion,
-  for example Ajv's `coerceTypes` [option], which
-  Fastify enables by default for every request part, including the body
+- **Empty states need controls.** Eligible unchecked Boolean checkboxes supply
+  `false`; empty declared collections supply `[]`. Disabled or absent controls
+  supply nothing. Legacy encodings omit unchecked controls, so servers must
+  handle the difference. Explicit-valued scalar checkboxes submit selected
+  values, not Boolean state.
+- **Script cannot create JSON-only empty states.** Only HTML entry construction
+  creates them, though `setFormValue()` preserves existing ones in `FormData`.
+  Script can supply visible `false` as `""` with a `"boolean"` hint, sent by
+  legacy encodings, or visible `[]` through `FormData.fromJSON({tags: []})`,
+  which creates `tags=""`. An API remains [open question 4][open questions].
+- **Types can change contracts.** Changing a control's type or a script hint
+  changes the JSON type.
+- **Read/write copies lose JSON information.** Non-file getters and iteration
+  expose strings, omitting hints and implicit empty states.
+  `data.set(name, data.get(name))` also clears that name's contribution.
+  Reapply hints or use `FormData.fromJSON(data.toJSON())` for dense labels.
+  That round trip loses file contents and canonicalises names. It materialises
+  `draft: false` as `draft=""` and an empty `tag[]` group as `tag=""` with JSON
+  value `[]`; deletion must use those canonical names.
+- **Nesting needs a limit.** Deep names cost browser and server recursion.
+  qs defaults to 5 levels; Rack errors at 32. Over-limit names stay flat, and
+  `fromJSON()` rejects deeper values it could not round-trip. A terminal `[]`
+  is not counted, allowing repeated names at the limit to round-trip with their
+  added canonical `[]`. Counting it and flattening repeated values instead
+  remains [open question 2][open questions].
+- **Schema compatibility.** Typed, nested output does not match every OpenAPI
+  or JSON Schema body. Schemas must allow omissions, numeric `null` and
+  scalar-to-array changes for repeated plain names. Strings may need coercion,
+  such as Ajv's `coerceTypes` [option], enabled by Fastify for all request parts
   ([`default-ajv-options.js`]).
-- **Order across names is lost.** Values keep their order within a name, but
-  interleaving between different names is not preserved. Servers that need the
-  full ordered entry list can keep using `multipart/form-data`.
-- **Newlines are not normalised.** The other encodings convert newlines to CRLF,
-  while JSON keeps line feeds as they are in the DOM. This matches what
-  `fetch()` with `JSON.stringify(new FormData(form))` would send.
-- **Fallback doesn't preserve every shape or upload files.** Browsers that
-  don't support the keyword fall back to `application/x-www-form-urlencoded`.
-  Values become strings, and PHP, Rack and qs differ on digit keys, repeated
-  plain names, quoted keys and conflicting paths. Servers accepting both formats
-  must handle those differences. For `multipart/json`, the fallback sends file
-  names, not file contents. Authors needing uploads in older browsers must use
-  `multipart/form-data`, for example as the baseline before feature-detecting
-  and selecting `multipart/json`.
+- **Order across names is lost.** Values remain ordered within a name.
+  Use `multipart/form-data` when full interleaving matters.
+- **Newlines stay unchanged.** Legacy encodings convert them to CRLF; JSON
+  preserves DOM line feeds, matching `JSON.stringify(new FormData(form))`.
+- **Fallback loses types and uploads.** Unsupported keywords fall back to
+  `application/x-www-form-urlencoded`. Servers must handle strings and parser
+  differences in numeric or quoted keys, repeats and conflicts. `multipart/json`
+  fallback sends filenames only. For older-browser uploads, use
+  `multipart/form-data` as the baseline and feature-detect the new encoding.
 - **Cross-origin needs server opt-in.** Cross-origin JSON submissions work only
   if the server answers the preflight with credentialed CORS headers.
   Compared with the other encodings:
@@ -904,21 +833,15 @@ Content-Type: image/png
   them. This, and whether servers need a signal that a preflight is for a
   navigation (for example `Sec-Fetch-Dest`), are questions for
   [whatwg/fetch#1785], and apply equally to PUT, PATCH and DELETE forms.
-- **Libraries that detect JSON bodies by `toJSON`.** Some fetch wrappers decide
-  to send a body as JSON because `typeof body.toJSON === "function"`. Under Bun,
-  old versions of [ofetch], which is Nuxt's `$fetch`, sent FormData bodies as
-  `application/json`. That was fixed in [unjs/ofetch#483] (Aug 2025), which
-  checks `instanceof FormData` first. Bun's tracker blames the same mechanism
-  for broken multipart uploads through node-fetch and axios
-  ([oven-sh/bun#21467]). That is the reporter's diagnosis and hasn't been
-  confirmed. An audit of current main branches found no other affected library.
-  axios, redaxios, wretch and Angular HttpClient check for FormData first. ky,
-  got, hono/client and tRPC only serialise JSON when you ask for it explicitly.
-  Native fetch, node-fetch and undici never call `toJSON()`. Wrappers that do
-  serialise a `FormData` as JSON can now encounter a `TypeError` for indexed
-  gaps, including when it is nested in a larger object. The remaining detection
-  risk is sites still bundling ofetch from before Aug 2025. Browsers would need
-  telemetry or a staged rollout to measure that.
+- **`toJSON`-detecting libraries.** Old [ofetch] (Nuxt's `$fetch`) sent Bun
+  `FormData` as JSON because it had `toJSON`. [unjs/ofetch#483] fixed detection
+  order in Aug 2025. The same cause was alleged for node-fetch and axios upload
+  failures in [oven-sh/bun#21467], but remains unconfirmed. A main-branch audit
+  found no other affected library: axios, redaxios, wretch and Angular check
+  `FormData` first; ky, got, hono/client and tRPC require explicit JSON; native
+  fetch, node-fetch and undici never call `toJSON()`. Wrappers that do can also
+  encounter indexed-gap errors, even with nested `FormData`. Measuring sites
+  still bundling old ofetch needs browser telemetry or a staged rollout.
 
 ## Open questions
 
@@ -939,15 +862,12 @@ before it ships.
    appears, and a `[]` name at the limit would stay flat.
 3. **Array labels** (stage 1; framework, server and browser authors): is
    rejecting non-dense labels acceptable for repeatable-row and optional-field
-   workflows, or is the dense-or-object shape better? The draft checks density
-   on every parsed indexed path before conflict flattening, so `t[0]`, `t[2]`
-   alongside `t[a]` throws; should only arrays that survive flattening be
-   checked, letting that example flatten? Should `toJSON()` stay strict, or
-   fall back without throwing while submissions stay strict, at the cost of a
-   representation that differs between script and submission? Should
-   unanswered radios get an empty state, given that `null` already means empty
-   numeric input? Can servers support quoted numeric object keys in the
-   urlencoded fallback?
+   workflows, or is the dense-or-object shape better? Should density be checked
+   only on arrays that survive flattening, letting `t[0]`, `t[2]` alongside
+   `t[a]` flatten? Should `toJSON()` stay strict, or fall back without throwing
+   while submissions stay strict? Should unanswered radios get an empty state,
+   given that `null` already means empty numeric input? Can servers support
+   quoted numeric object keys in the urlencoded fallback?
 4. **Empty states from script** (stage 1; framework and custom element
    authors): script and custom elements can't create JSON-only empty states,
    and `fromJSON()` turns `[]` into a visible entry such as `tags=""`. Is an
@@ -964,10 +884,10 @@ before it ships.
    preflight is for a navigation?
 7. **Conversion failure feedback** (stage 2; browser vendors and accessibility
    experts): a submission whose conversion throws sends no request. We
-   recommend that, before stage 2 ships, this produce at least an
-   author-visible diagnostic such as a console warning. Should there also be a
-   form-level event like `invalid`, and accessible feedback for the user? Their
-   names, timing and details are undecided.
+   recommend at least an author-visible diagnostic such as a console warning
+   before stage 2 ships. Should there also be a form-level event like
+   `invalid`, and accessible feedback for the user? This draft defines none of
+   these, and their names, timing and details are undecided.
 8. **Is `multipart/json` worth a new media type?** (stage 2; server authors): is
    a typed, nested JSON part worth a registration and parser changes, over
    rebuilding structure from `multipart/form-data` field names?
@@ -1228,18 +1148,16 @@ _value_, and return _entries_. Given a JSON path _path_ and a value _node_:
 2. For each prefix with recorded labels, let _n_ be the number of distinct
    labels. If any of its labels is _n_ or greater, then throw a `TypeError`.
 
-Distinct labels all below _n_ are exactly `0` to _n_ - 1. This runs before
-conflict flattening, over every item parsed as a path, and before any indexed
-output list is built. Density is an admission rule for parsed indexed paths, so
-adding a contradictory field cannot make an otherwise non-dense indexed path
-acceptable. Thus `t[0]`, `t[2]` alongside `t[a]` throws even though flattening
-would preserve all three names. This keeps gap acceptance independent of the
-presence of conflicting fields; it isn't needed for entry-order independence.
-Checking only arrays that survive flattening would be order-independent too.
-Which policy to use is an [open question][open questions]. The check needs work
-proportional to the total length of the names. Implementations can keep labels
-as digit strings, and a label with more digits than _n_ fails without being
-converted to an integer or sizing any allocation.
+Distinct labels all below _n_ are exactly `0` to _n_ - 1. The check runs
+before conflict flattening, over every item parsed as a path, and before any
+indexed output list is built. As an admission rule for parsed indexed paths, it
+means a contradictory field can't make a non-dense path acceptable, so `t[0]`,
+`t[2]` alongside `t[a]` throws even though flattening would preserve all three
+names. Checking only arrays that survive flattening would be order-independent
+too; which policy to use is an [open question][open questions]. The check needs
+work proportional to the total length of the names. Implementations can keep
+labels as digit strings, and a label with more digits than _n_ fails without
+being converted to an integer or sizing any allocation.
 
 The `toJSON()` method steps are to return the result of [converting an Infra
 value to a JSON-compatible JavaScript value] given the result of ? converting
@@ -1353,9 +1271,8 @@ type isn't possible, because the value is recursive.
 - In [Submit as entity body], add a case for `application/json`:
   1. Let _map_ be the result of running convert an entry list to a JSON value
      given _entry list_. If this throws, end these steps, so no request is sent
-     and nothing navigates. How the failure is reported is unresolved; open
-     question 7 recommends at least an author-visible diagnostic before this
-     ships, and these steps don't mean the failure stays silent.
+     and nothing navigates. How the failure is reported is unresolved (open
+     question 7), and it is not meant to stay silent.
   2. Let _body_ be the result of running [serialize an Infra value to JSON
      bytes] given _map_.
   3. Let _mimeType_ be `` `application/json` ``.
@@ -1415,40 +1332,42 @@ WHATWG XMLHttpRequest, Fetch and HTML, in two stages:
    both. Their steps use the same conversion as `toJSON()`, and cross-origin
    submissions rely on the preflight from [whatwg/fetch#1785].
 
-Each stage lands with web-platform-tests. For stage 1, the tests cover nesting,
-arrays of objects, nested and mixed arrays, shared labels grouping fields,
-dense labels in any entry order, `TypeError`s for missing, large and nested
-missing labels (including alongside contradictory names, such as `t[0]`,
-`t[2]` and `t[a]`), quoted numeric object keys, leading-zero keys, bare
-top-level digit keys with quoted nested digit keys in canonical names, the
-nesting limit with a final `[]` not counted (a repeated name at the limit
-round-trips through `fromJSON()`),
-the flat fallback for invalid and contradictory names (including append/index
-and object/index conflicts), typed controls, the type-hint arguments of `append()`,
-`set()` and `setFormValue()` keeping today's strings for `get()` and existing
-encodings, empty-string boolean conversion, invalid and overflowing numbers
-(such as `1e400`) giving null while keeping their strings,
-replacement clearing old JSON values, restoration-state handling unchanged,
-per-entry JSON values surviving FACE submission, script-added values without
-hints staying strings, `__proto__` names, `JSON.stringify()` of a `FormData`,
-and `fromJSON()`: canonical names, its `TypeError`s, and the round trip both
-ways. The navigation preflight tests belong to [whatwg/fetch#1785]. Stage 2
-covers the body shape, `formenctype` precedence, feature detection, conversion
-failures sending no request, and cross-origin preflight including redirect
-handling, for both keywords. For `multipart/json`, the tests would also cover
-the `Content-Type`, part order, the JSON part's headers, and canonically named
-file parts in JSON traversal order,
-including files submitted with dense labels out of numeric order.
+Each stage lands with web-platform-tests. Stage 1 covers:
+
+- Names and structure: nesting, arrays of objects, nested and mixed arrays,
+  shared labels, dense labels in any entry order, `TypeError`s for missing,
+  large and nested missing labels (including alongside contradictory names such as
+  `t[0]`, `t[2]`, `t[a]`), quoted numeric object keys, leading-zero keys, bare
+  top-level digit keys with quoted nested ones, the nesting limit with an
+  uncounted final `[]` (a repeated name at the limit round-trips), the flat
+  fallback for invalid and contradictory names (including append/index and
+  object/index conflicts), and `__proto__` names.
+- Values: typed controls, the type-hint arguments of `append()`, `set()` and
+  `setFormValue()` keeping today's strings for `get()` and existing encodings,
+  empty-string boolean conversion, invalid and overflowing numbers (such as
+  `1e400`) giving null while keeping their strings, replacement clearing old
+  JSON values, unchanged restoration-state handling, per-entry JSON values
+  surviving FACE submission, and unhinted script-added values staying strings.
+- `JSON.stringify()` of a `FormData`, and `fromJSON()` canonical names,
+  `TypeError`s and round trip both ways.
+
+The navigation preflight tests belong to [whatwg/fetch#1785]. Stage 2 covers
+the body shape, `formenctype` precedence, feature detection, conversion
+failures sending no request, and cross-origin preflight including redirects,
+for both keywords. For `multipart/json` it also covers the `Content-Type`, part
+order, the JSON part's headers, and canonically named file parts in JSON
+traversal order, including files with dense labels out of numeric order.
+
 Empty-state coverage includes unchecked scalar booleans, empty declared groups,
 disabled controls and options, explicit empty option values, native file
 placeholders versus script-added files, duplicate and nested fallback targets,
-repeated false contributions under one source name coalescing while
-differently spelled names for the same path don't, checked and unchecked
-terminal-`[]` names that conflict flattening keeps whole,
-exact-name mutation clearing, alternate indexed paths suppressing defaults,
-and legacy getters and encodings remaining unchanged. Incremental receiver
-coverage must check early JSON availability and cancellation without asserting
-that no file bytes were sent.
+repeated false contributions under one source name coalescing while differently
+spelled names for the same path don't, checked and unchecked terminal-`[]`
+names kept whole by conflict flattening, exact-name mutation clearing, alternate
+indexed paths suppressing defaults, and unchanged legacy getters and encodings.
+
+Incremental receiver coverage must check early JSON availability and
+cancellation without asserting that no file bytes were sent.
 
 [Keith Cirkel]: https://github.com/keithamus
 [sveltekit-superforms]: https://github.com/ciscoheat/sveltekit-superforms/blob/main/src/lib/formData.ts

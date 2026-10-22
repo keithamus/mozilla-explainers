@@ -2,147 +2,128 @@
 
 Author: [Keith Cirkel]
 
+## Summary
+
+Register a scripted submission's promises with its form. The form stays
+submitting until native submission and every registered promise have settled,
+even if one rejects.
+
+```js
+const form = document.querySelector("form");
+form.addEventListener("submit", event => {
+  event.preventDefault();
+  const body = new FormData(form, event.submitter);
+  const work = fetch(form.action, { method: "POST", body })
+    .then(response => response.text());
+  form.trackSubmission(work);
+  work.catch(console.error);
+});
+```
+
+`trackSubmission()` is a provisional name. The shared pending state drives
+[conditional disabling]; cancellation and result handling remain the listener's
+job.
+
 ## User problems to be solved
 
-A form submitted with script still needs to tell users that their submission is
-in progress. Authors disable buttons, display progress, and restore the controls
-when the operation finishes. Each application has to maintain this state itself.
+A scripted submission needs pending state so authors can disable controls and
+show progress until it finishes. Cancelling native submission to use `fetch()`
+disconnects that work from the form's lifecycle; the browser cannot infer
+which promises belong to it or whether response processing is included.
 
-A submission can involve several asynchronous operations. Re-enabling a button
-when one operation finishes can let the user submit again while another request
-is still running. An error in an auxiliary operation does not mean that a
-state-changing request has stopped.
-
-Cancelling the browser's default submission to use `fetch()` also disconnects
-that work from the form's native submission lifecycle. The browser cannot infer
-which promise represents the submission, or whether processing the response is
-part of it.
+Several operations may contribute. Re-enabling controls when one finishes
+allows another submission while other work is still pending, even if the
+first operation failed.
 
 ## Methodology for approaching & evaluating solutions
 
-- Let script participate in the form's submission state without replacing
-  validation, submitter selection, or the `submit` event.
-- Keep cancellation explicit. Tracking a promise must not send a request or
-  cancel the browser's default action.
-- Track pending work independently of its outcome. Reporting an error must not
-  require pretending that other pending work has finished.
-- Reuse promises rather than introduce a submission-result format, transport,
-  timeout policy, or cancellation mechanism.
-- Share the lifecycle with [conditional disabling], rather than define separate
-  native and scripted meanings of submitting.
+- Let script share submission state, preserving validation, submitter selection
+  and the `submit` event.
+- Keep cancellation explicit. Tracking work must not send a request or cancel
+  the default action.
+- Track pending work independently of success or failure.
+- Reuse promises without adding result, transport, timeout or cancellation APIs.
+- Share the native and scripted lifecycle with [conditional disabling].
 
 ## Prior features and proposals
 
 - HTML's [form submission algorithm] validates controls, fires `submit`, builds
-  the payload, and performs the native submission. A listener can cancel the
-  default action, but cannot register replacement asynchronous work with it.
-- `requestSubmit()` initiates a submission through validation and the `submit`
-  event. `submit()` bypasses those steps. Neither registers an application's
-  existing promise.
-- An event listener can be `async`, but its returned promise does not extend
-  event dispatch or make the default action wait.
-- [`Promise.allSettled()`] observes when every input promise has settled,
-  independently of whether it fulfilled or rejected.
-- Authors can implement pending state in script and use it to set `disabled` or
-  `aria-busy`. The application maintains that state, and the browser has no way
-  to link it to the form's submission lifecycle.
+  the payload and submits. Listeners can cancel it but cannot register
+  replacement asynchronous work.
+- `requestSubmit()` runs validation and fires `submit`; `submit()` bypasses
+  both. Neither registers an existing promise.
+- An `async` listener's returned promise does not extend event dispatch or
+  delay the default action.
+- [`Promise.allSettled()`] waits for every input, whether fulfilled or rejected.
+- Script can toggle `disabled` or `aria-busy`, but the browser cannot link that
+  state to submission.
 
 ## Flaws or limitations in existing features/proposals
 
-A `fetch()` request does not identify a form, its submitter, or the point at
-which the application has finished applying its response. Fetch fulfilment
-itself only makes the response available; consuming the body and updating the
-page can still be pending.
-
-A local `finally` handler can restore a button while work registered elsewhere
-is still pending. Combining promises in application code works when one caller
-owns every operation, but not when independent callers contribute work.
+`fetch()` identifies neither the form nor its submitter. Fulfilment makes the
+response available, but body consumption and page updates may still be pending.
+A local `finally` handler can restore controls too early; combining promises
+works only when one caller owns every operation.
 
 ## Motivation for this explainer
 
-The [JSON form encoding] and [FormValidation] explainers address payloads and
-constraints. They do not tell the browser how long a script-handled submission
-lasts. Associating promises with the form lets native submission and script use
-the same pending state, without making either encoding or validation responsible
-for transport.
+[JSON form encoding] and [FormValidation] address payloads and constraints.
+Associating promises with the form would let script share native pending state
+without making those APIs responsible for transport.
 
 ## Proposed solution
 
 Add a promise-taking method to `HTMLFormElement`. This explainer uses
 `trackSubmission(promise)` as a working spelling; the name is not settled.
 
-The method registers work with the form's submission state. It does not call
-`preventDefault()`, perform validation, construct a request, or interpret the
-promise's value. Authors that replace native submission must still cancel the
-`submit` event explicitly.
+It registers work without cancelling submission, validating, constructing a
+request or interpreting the promise's value. Replacing native submission still
+requires `preventDefault()`.
 
 ### Submission lifetime
 
-A form's pending work can include:
+Pending work includes the native submission and each registered promise.
+Cancelling the default action completes only the native contribution; otherwise
+native and registered work both contribute.
 
-- the browser's native submission; and
-- each promise registered through the method.
+The form remains submitting until **all contributions have settled**. Rejection
+ends only that promise's contribution; it neither clears other work nor cancels
+or retries requests. Fulfilment values and rejection reasons do not affect this
+state. An auxiliary failure can therefore be shown while an order POST keeps
+the form busy.
 
-Cancelling the native default action treats the native contribution as
-completed. Registered promises remain pending even when that action is
-cancelled. If the native action proceeds, both native and registered work
-contribute to the lifetime.
-
-The form remains submitting until **all contributions have settled**. A rejected
-promise completes only its own contribution. It does not clear other pending
-work, cancel requests, or cause the browser to retry anything. The promise's
-fulfilment value and rejection reason have no effect on this bookkeeping.
-
-For example, if an auxiliary request rejects while an order POST is pending,
-the form remains submitting until the POST also finishes. The application can
-show the auxiliary error immediately; presenting an error does not have to wait
-for busy state to clear.
-
-The lifetime follows `Promise.allSettled()` rather than `Promise.all()`. It does
-not expose the array of settlement results as a new form API. Callers already
-have their own promises and remain responsible for presenting results and
-handling failures.
-
-The examples register work synchronously during `submit` dispatch. The allowed
-registration window, and whether registration outside an attempt is useful,
-remain open questions.
+This follows `Promise.allSettled()` rather than `Promise.all()`, without adding
+a results API. Callers retain their promises and handle results and failures.
+The examples register synchronously during `submit`; the allowed registration
+window remains open.
 
 ### Preserving the submission entry list
 
-[Conditional disabling] must not change the payload of the submission that
-caused it. In native HTML submission, the payload is built after the `submit`
-event. Disabling a control before then would omit its `name` and `value`;
-disabling a fieldset or form could omit a whole group of values.
+[Conditional disabling] must preserve the triggering submission's payload.
+Native submission builds it after `submit`, so conditional disabling must wait
+until it has been captured. Disabling earlier would omit controls' values.
 
-The proposed ordering therefore defers conditional disabling until the current
-native payload has been captured. If script cancels native submission,
-conditional disabling takes effect after `submit` dispatch; script can capture
-`new FormData(form, event.submitter)` synchronously in its listener first.
-
-This does not change ordinary disabling performed explicitly by a listener,
-which continues to affect the payload under HTML's existing rules. It also does
-not freeze fields or automatically capture data for a scripted request.
+When script cancels native submission, conditional disabling applies after
+`submit` dispatch. A listener can first capture
+`new FormData(form, event.submitter)` synchronously. Ordinary disabling by a
+listener still affects the payload under HTML's existing rules. This proposal
+neither freezes fields nor captures data for script.
 
 ### Errors and cancellation
 
-Tracking work is separate from handling its result. Applications must not have
-to suppress a rejection to keep the form submitting while other work continues.
-How rejections are reported once the browser observes the promise still needs
-specifying, but registering work must not silently swallow failures.
+Registration must not silently swallow rejections or require applications to
+suppress them while other work continues. Rejection reporting remains open.
 
-A never-settling promise keeps its contribution pending. The method does not add
-a timeout. Authors can cancel the underlying operation where it supports
-cancellation and register a promise that reflects the resulting completion.
-Settling a promise alone does not prove that every side effect it started has
-stopped.
+A never-settling promise keeps its contribution pending; there is no timeout.
+Authors can cancel supported operations and register promises reflecting their
+completion, but settlement alone does not prove that side effects have stopped.
 
 ## Examples
 
 ### Replacing native submission
 
-This example uses the proposed method and [conditional disabling]. The promise
-includes consuming the response and updating the page. The endpoint accepts
-ordinary multipart form data; JSON encoding is not required.
+This uses the proposed method and [conditional disabling] with ordinary
+multipart data, not JSON. The promise covers response consumption and page updates.
 
 ```html
 <form id="profile" action="/profile" method="post">
@@ -180,9 +161,6 @@ ordinary multipart form data; JSON encoding is not required.
 </script>
 ```
 
-The explicit `preventDefault()` prevents a second, native request. Without it,
-tracking the promise would leave native submission enabled as well.
-
 ### Choosing a composite lifetime
 
 An author can register one composite promise for work they own:
@@ -191,27 +169,22 @@ An author can register one composite promise for work they own:
 form.trackSubmission(Promise.all([upload, save]));
 ```
 
-If that composite rejects early, its contribution ends even if its constituent
-operations continue. Any independently registered promises or native submission
-still keep the form submitting. To track both operations through settlement,
-register them separately or register `Promise.allSettled([upload, save])`.
+If the composite rejects early, its contribution ends while its operations may
+continue. Other registered or native work remains pending independently. To
+track both operations through settlement, register them separately or use
+`Promise.allSettled([upload, save])`.
 
 ## Caveats, shortcomings, and other drawbacks of design choices
 
-- Slow or hung registered work can delay re-enabling buttons after an error.
-  Only work whose lifetime should affect submission belongs in this set.
-- A fulfilled `fetch()` promise does not mean an HTTP success response. Authors
-  decide what constitutes success and how to display a response.
-- This method does not restore the navigation, history, focus, or response
-  rendering behaviour lost when an application replaces native submission.
-- Native completion is not equivalent to unloading the source document.
-  Downloads, HTTP 204 responses, cancellation, and submissions targeting another
-  browsing context need completion paths that release the contribution.
-- Page replacement and restoration must not leave a restored form busy with
-  obsolete native work. They must not accidentally clear still-relevant script
-  work either; that lifecycle needs further definition.
-- Ending pending state does not establish that a server did not process a
-  request. The API provides neither exactly-once execution nor server rollback.
+- Slow or hung work delays re-enabling controls, even after an error. Register
+  only work whose lifetime should affect submission.
+- Fetch fulfilment does not establish HTTP success. Authors interpret responses.
+- Tracking does not restore native navigation, history, focus or rendering.
+- Native completion must cover downloads, HTTP 204, cancellation and other
+  target contexts, not just document replacement.
+- Restoration must distinguish obsolete native work from still-relevant script
+  work; that lifecycle remains open.
+- Completion guarantees neither exactly-once execution nor server rollback.
 
 ## Open questions
 
@@ -233,22 +206,15 @@ register them separately or register `Promise.allSettled([upload, save])`.
 
 ## Draft specification
 
-Extend HTML's submission algorithms with native-work bookkeeping, and associate
-registered promises with the form. Derive submitting state from whether any
-contribution remains pending. Marking any contribution completed, fulfilled or
-rejected must leave all other pending contributions intact.
+Associate native work and registered promises with the form. It is submitting
+while any contribution is pending; completing one must leave others intact.
 
-A validation failure before `submit` creates no new native pending contribution.
-Cancelling `submit` completes its native contribution without removing
-registered promises. A reset changes controls; it does not cancel requests or
-settle registered promises.
+Failed validation creates no native contribution. Cancelling `submit` completes
+only the native contribution. Reset changes controls without cancelling work
+or settling registered promises. Apply conditional disabling after entry capture.
 
-Apply conditional-disabled effects only after the entry-list boundary described
-above. Native submission remains possible without any registered promises;
-script-only submission remains pending without a native contribution.
-
-The native completion hooks, registration window, and overlapping-attempt rules
-must be resolved before this outline becomes a normative algorithm.
+Native completion, registration windows and overlapping attempts must be
+resolved before this becomes normative.
 
 ## Incubation and/or standardization destination
 

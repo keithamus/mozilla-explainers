@@ -2,36 +2,39 @@
 
 Author: [Keith Cirkel]
 
+## Summary
+
+Run HTML's form constraints against `FormData`, in the browser or on a server
+without a DOM. Define rules as data or extract them with
+`new FormValidation(form)`, then serialise them for reuse.
+
+```js
+const rules = new FormValidation({
+  email: { type: "email", required: true },
+  username: { required: true, pattern: "[a-z0-9_]+", maxLength: 20 },
+});
+const restored = new FormValidation(rules.toJSON());
+const { valid, fields } = restored.validate(formData);
+```
+
+Results use HTML's validity flags. Rules match exact entry names; sharing rules
+across JSON name conversion remains an [open question](#open-questions).
+
 ## User problems to be solved
 
-HTML [constraint validation] lets authors declare rules on form controls
-(`required`, `pattern`, `min`, `max`, `step`, `minlength`, `maxlength`, and
-types like `email`, `url` and `date`), and browsers enforce them before
-submission. Those rules only exist on elements in a document. There is no way
-to run them against data.
+HTML [constraint validation] enforces rules on form controls, not on data.
+Servers must repeat those rules because clients can bypass validation, but
+server runtimes have `FormData` without a DOM. General validators differ from
+HTML on patterns, step bases, lengths and email syntax, so the two checks can
+disagree.
 
-That leaves three gaps:
-
-1. **Servers have to validate again.** Client-side validation can be bypassed by
-   any non-browser client, so every endpoint must check the submission itself.
-   Server runtimes have `FormData` but no DOM, so they can't run HTML's
-   algorithms. Authors restate each rule in a server-side schema and hope the
-   two agree.
-2. **The restated rules don't agree.** HTML's rules have details that general
-   purpose validators get wrong or define differently. For example, `pattern`
-   is anchored and compiled with the `v` flag, `step` counts from `min`,
-   textarea lengths count line breaks as one character, and the email grammar
-   is HTML's own. A submission the browser accepts can be rejected by the
-   server, and the reverse.
-3. **Script-built data can't be checked.** A `FormData` assembled in script,
-   modified in a `formdata` event, or restored from storage has no elements to
-   ask. Authors either create hidden controls to borrow their validity, or
-   reimplement the rules.
+Script-built, modified or restored `FormData` has the same problem. Authors
+must create hidden controls to borrow their validity or reimplement the rules.
 
 ### Evidence of demand
 
-Libraries already maintain a mapping between server schemas and HTML
-constraints, in the direction of generating attributes from a schema:
+Libraries already map between server schemas and HTML constraints, generating
+attributes from a schema:
 
 - **Conform** (`@conform-to/zod`, ~297k weekly downloads) ships
   [`getZodConstraint`], which "returns an object containing the validation
@@ -40,21 +43,20 @@ constraints, in the direction of generating attributes from a schema:
   generated for case-insensitive regexes or when the serialized regex is not a
   valid HTML `pattern` under the browser's `v` flag."
 - **sveltekit-superforms** (~294k weekly) exposes [`$constraints`][superforms
-  constraints] so authors can "use the built-in browser validation" by
-  spreading schema-derived attributes onto inputs. It warns that for `date`
-  fields "both the underlying data and the constraint needs to be in
-  `yyyy-mm-dd` format", and recommends overriding the generated `min` by hand.
+  constraints], schema-derived attributes authors spread onto inputs to "use the
+  built-in browser validation". It warns that for `date` fields "both the
+  underlying data and the constraint needs to be in `yyyy-mm-dd` format", and
+  recommends overriding the generated `min` by hand.
 - **Zod** ships a second email regex, [`html5Email`][Zod regexes], described as
   "Equivalent to the HTML5 input[type=email] validation implemented by
   browsers", because its default `z.email()` accepts a different set of
-  addresses. The copy is taken from MDN rather than the HTML Standard, and goes
+  addresses. The copy comes from MDN rather than the HTML Standard, so it goes
   stale if HTML changes the grammar, which [whatwg/html#4562] proposes for
   internationalised addresses.
 - **validator.js** (~29M weekly) [`isEmail`][validator isEmail] accepts quoted
   and UTF-8 local parts that HTML rejects.
 
-The same field, checked by the browser and by the schemas a server typically
-uses, gives different answers:
+Browser and server checks can disagree:
 
 | Field                          | Value              | Browser | Typical server check                    |
 | ------------------------------ | ------------------ | ------- | --------------------------------------- |
@@ -64,109 +66,68 @@ uses, gives different answers:
 | `<textarea maxlength=9>`       | `abcd`, LF, `efgh` | valid   | invalid: `z.string().max(9)`            |
 
 - JSON Schema [`pattern`][JSON Schema pattern] notes that "regular expressions
-  are not implicitly anchored", while HTML's [`pattern`] must match the whole
-  value. `RegExp.prototype.test()`, which Zod's `.regex()` uses, is unanchored
-  too.
-- Zod's default email regex requires a dot and a two-letter top-level domain.
-  HTML's [valid email address] doesn't.
-- HTML counts steps from the [step base][`step`], `min` when present, so the
-  allowed values are 0.25, 0.75, 1.25 and so on. JSON Schema
-  [`multipleOf`][JSON Schema multipleOf] counts from zero.
-- [`maxlength`] on a [`textarea`] measures the API value, "normalized so that
-  line breaks use U+000A LINE FEED (LF) characters". Existing form encodings
-  [convert line breaks to CRLF][name-value pairs], so the server receives 10
-  code units for a value the browser measured as 9. The proposed [JSON form
-  encoding] keeps LF.
+  are not implicitly anchored". Zod's `.regex()` is also unanchored; HTML's
+  [`pattern`] must match the whole value.
+- Zod's email regex requires a dot and a two-letter top-level domain; HTML's
+  [valid email address] doesn't.
+- HTML's [step base][`step`] is `min` when present, allowing 0.25, 0.75, 1.25,
+  etc. JSON Schema [`multipleOf`][JSON Schema multipleOf] counts from zero.
+- [`textarea`] [`maxlength`] measures the API value, "normalized so that
+  line breaks use U+000A LINE FEED (LF) characters". Legacy encodings
+  [convert them to CRLF][name-value pairs], turning 9 code units into 10 in the
+  example. [JSON form encoding] keeps LF.
 
 Weekly download figures are from api.npmjs.org for 2026-09-22 to 2026-09-28.
 
 ## Methodology for approaching & evaluating solutions
 
-- **One definition per constraint.** HTML's element validity and the new API
-  must call the same algorithms, so a browser and a server can't disagree about
-  the same data.
-- **Reuse existing vocabulary.** Constraint names follow the existing IDL
-  attributes (`required`, `pattern`, `minLength`), field types follow the `type`
-  IDL attribute, and results use the [`ValidityState`] flag names. Authors
-  shouldn't learn a second spelling of the rules they already write in markup.
-- **Run wherever `FormData` runs.** That includes Window, workers, and the
-  server runtimes that implement WinterTC's [Minimum Common Web Platform API],
-  which already lists `FormData` and `URL`.
-- **Plain data in, plain data out.** Rules must serialise to JSON, so they can
-  be written once and moved between a server, a build step and a page.
-- **Add no new constraints.** The API covers what HTML enforces, nothing more.
-  Following the [Extensible Web Manifesto], it is a primitive that libraries can
-  build messages, cross-field rules and schema adapters on top of.
-- **Validate data, not interaction.** The result depends only on the entry list,
-  never on focus, edit history, or which controls exist at the time.
-- **Keep field identity explicit.** Rules and results use the exact names in the
-  entry list being validated. JSON canonicalisation can change those names; it
-  must not silently retarget a rule to another field.
+- Share HTML's constraint algorithms, IDL names and [`ValidityState`] flags.
+- Run wherever `FormData` runs, including Window, workers and WinterTC's
+  [Minimum Common Web Platform API] runtimes, which already have `FormData`
+  and `URL`.
+- Serialise rules as JSON for use on servers, at build time and in pages.
+- Add no constraints. Libraries can build messages, cross-field rules and
+  adapters on this primitive, following the [Extensible Web Manifesto].
+- Validate entries independently of focus, edit history or current controls.
+- Match exact entry names; JSON canonicalisation must not silently retarget
+  rules.
 
 ## Prior features and proposals
 
-- **The constraint validation API** (`checkValidity()`, `validity`,
-  `setCustomValidity()`) exists only on form-associated elements.
-  [`ValidityState`] is `[Exposed=Window]` and has no constructor.
-- **[`ElementInternals.setValidity()`]** lets [form-associated custom elements]
-  report validity, but only as flags the element computes itself. It is still
-  bound to an element.
-- **JSON Schema and OpenAPI** describe JSON documents. Their keywords resemble
-  HTML's constraints but differ in semantics, as shown above, and they model
-  objects rather than entry lists with repeated names and `File` values.
-- **[Standard Schema]** is a userland interface, a `~standard.validate()`
-  method, that Zod, Valibot, ArkType and 30 or so other libraries implement so
-  tools can accept any of them. It defines how to call a validator, not what
-  any rule means.
-- **Schema-to-attribute helpers** such as Conform's [`getZodConstraint`] and
-  superforms' [`$constraints`][superforms constraints] derive HTML attributes
-  from a server schema.
-- **DOM implementations in server runtimes**, such as jsdom, can parse a form
-  and call `checkValidity()`, at the cost of shipping a DOM to validate a
-  request.
+- **Constraint validation** needs elements. [`ValidityState`] is
+  `[Exposed=Window]` with no constructor.
+- **[`ElementInternals.setValidity()`]** accepts flags computed by a
+  [form-associated custom element][form-associated custom elements].
+- **JSON Schema and OpenAPI** use different semantics and model objects, not
+  repeated entries and `File` values.
+- **[Standard Schema]** lets tools call Zod, Valibot, ArkType and roughly 30
+  other libraries through `~standard.validate()`, without defining rule semantics.
+- **Schema-to-attribute helpers**, including Conform's [`getZodConstraint`] and
+  superforms' [`$constraints`][superforms constraints], generate HTML attributes.
+- **Server DOMs**, such as jsdom, can parse forms and call `checkValidity()`.
 
 ## Flaws or limitations in existing features/proposals
 
-- The constraint validation API needs elements. Servers don't have them, and
-  script-built entry lists don't correspond to any.
-- `ValidityState` flags depend on interaction. [`maxlength`] and `minlength`
-  only apply when the "value was last changed by a user edit (as opposed to a
-  change made by a script)", so a prefilled value that breaks them passes.
-- JSON Schema and general validators implement different rules under similar
-  names. A schema has to be written with HTML's semantics in mind for it to
-  agree with the browser, and nothing checks that it does.
-- Schema-to-attribute helpers translate one way and lose information. Conform
-  can't express a case-insensitive regex as a `pattern`, and superforms needs
-  hand-written `min` overrides for dates. The server still runs the schema's
-  rules, not the browser's.
-- Standard Schema leaves semantics to each library, so two compliant validators
-  can disagree about the same `pattern`.
-- Running a DOM on the server is heavy, and still validates elements rather than
-  the entry list the server received.
+The existing API requires elements rather than received entries. Shipping a DOM
+to the server is heavy. Element validity also depends on interaction:
+[`maxlength`] and `minlength` apply only when the "value was last changed by a
+user edit (as opposed to a change made by a script)", so prefilled values pass
+even in the browser.
+
+Schema-to-attribute helpers translate one way and lose information. Neither
+they nor Standard Schema ensure that server and browser rules agree.
 
 ## Motivation for this explainer
 
-The browser already has a specified, interoperable set of form constraints.
-Defining them over an entry list instead of an element makes them
-available everywhere `FormData` is, and lets one set of constraints drive both
-the markup and the server check. Rule names must still match the submitted
-representation, as described in [Entry names and JSON
-canonicalisation](#entry-names-and-json-canonicalisation).
+Define HTML's constraints over entries so one rule set can drive markup and
+server checks. Names must match the
+[submitted representation](#entry-names-and-json-canonicalisation).
 
 ## Proposed solution
 
 A new `FormValidation` interface, exposed in every global. It holds constraints
 keyed by exact entry name, and checks a `FormData` against them. It does not
 parse or canonicalise names.
-
-```js
-const rules = new FormValidation({
-  email: { type: "email", required: true },
-  username: { required: true, pattern: "[a-z0-9_]+", maxLength: 20 },
-});
-
-const { valid, fields } = rules.validate(formData);
-```
 
 ### Constructing from a dictionary
 
@@ -196,12 +157,9 @@ and superforms' generated objects already are.
 date rule reads `{ type: "date", min: "2026-01-01" }`. Numbers convert to
 strings through WebIDL as usual.
 
-Unlike markup, where invalid attributes are ignored, the dictionary is strict.
-An unknown `type` throws a `TypeError`, as does a member that doesn't apply to
-the type, or a `min`, `max` or `step` that doesn't parse for it. A `pattern`
-that doesn't compile with the `v` flag throws a `SyntaxError`. A mistake in a
-server-side rule should fail when the rule is written, not silently accept every
-submission.
+Unlike markup, the dictionary rejects invalid rules. Unknown types,
+inapplicable members and unparseable `min`, `max` or `step` throw `TypeError`.
+A `pattern` that cannot compile with the `v` flag throws `SyntaxError`.
 
 ### Entry names and JSON canonicalisation
 
@@ -224,21 +182,15 @@ Rules for reconstructed JSON must use those canonical names. A rule for
 `[]` is part of the exact name, not a wildcard, so `pet[][name]` does not match
 `pet[0][name]`. Quoted numeric object keys remain distinct from array indices.
 
-Canonicalisation depends on the complete submitted structure, not on a name in
-isolation. Whether an array uses `[]` depends on all of its elements, leaf
-arrays merge names, and an otherwise unruled entry can cause conflicting paths
-to stay flat. An indexed level missing a position has no canonical form:
-conversion fails rather than renumbering it. Canonicalising a rule dictionary
-independently of the data can therefore attach constraints to the wrong value.
-Neither constructor does this.
+Canonicalisation needs the complete structure. Array elements determine whether
+names use `[]`, leaf arrays merge names, and unruled entries can cause conflicting
+paths to stay flat. Gapped indices fail conversion. Neither constructor
+canonicalises rule keys independently, which could retarget them.
 
-With the current exact-name matching, source-name rules check original entries
-and canonical-name rules check `FormData.fromJSON()` entries. This does not yet
-meet the goal of sharing one rule set across the round trip; see [open
-questions](#open-questions). Array positions survive reconstruction, but the
-spelling of leaf labels, quoted keys and flattened names does not. Quoted
-object keys allow a sparse keyed record, which becomes a JSON object rather
-than an array.
+With current exact-name matching, source-name rules check original entries and
+canonical-name rules check `FormData.fromJSON()` entries. Sharing one rule set
+across that round trip remains [unresolved](#open-questions). Quoted numeric
+keys can represent sparse records as JSON objects rather than arrays.
 
 ### Constructing from a form
 
@@ -259,13 +211,10 @@ record. For each of the form's listed elements, in tree order:
    merge, which covers the common cases: checkbox groups and repeated rows such
    as `name="items[]"`.
 
-The result is a snapshot of source names and constraints, not of the current
-successful entries. An unchecked required control still contributes a rule.
-Later changes to the form don't affect the snapshot. It does not translate
-source names into the names of a JSON submission.
-
-This overload follows the `FormData` constructor, which takes an
-`HTMLFormElement` but is also exposed in workers, where no form can be passed.
+This snapshots source names and constraints, not successful entries: unchecked
+required controls still contribute rules. Later form changes do not update it,
+and it does not translate names for JSON submission. Workers expose the
+interface but have no form to pass to this overload.
 
 ### Validating
 
@@ -281,20 +230,18 @@ This overload follows the `FormData` constructor, which takes an
 }
 ```
 
-Each field result has the [`ValidityState`] flags, except `customError`, which
-has no data equivalent. Result keys are exactly the rule keys, including fields
-with no matching entries. Entries whose names have no rule are ignored.
+Each field has [`ValidityState`] flags except `customError`, which has no data
+equivalent. Result keys are exactly the rule keys, including those without
+entries; unruled entries are ignored.
 
-A rule applies to ordinary entries whose stored name equals its key, and to
-active JSON-only empty-state contributions whose original source name equals
-that key. Contributions use the [JSON form encoding] proposal's activation
-rules; they remain invisible to public getters and legacy encodings. Validation
-does not convert the data to JSON or canonicalise names.
+Rules match ordinary entries by stored name and active JSON-only empty-state
+contributions by original source name. The [JSON form encoding] activation
+rules apply; contributions remain invisible to public getters and legacy
+encodings. Validation neither converts to JSON nor canonicalises names.
 
-For an ordinary entry, checks retain both the original string or `File` and its
-optional internal JSON value. Untyped entries keep HTML's existing string and
-file semantics. Typed values are accepted only by the following policy; a hint
-does not request arbitrary coercion. "Present" means able to satisfy `required`,
+Checks retain the raw string or `File` and optional internal JSON value.
+Untyped entries use HTML's string/file semantics; typed values follow this
+table without arbitrary coercion. "Present" means able to satisfy `required`,
 not necessarily valid:
 
 | Internal JSON value | Compatible rule types | Presence and checks |
@@ -308,33 +255,25 @@ not necessarily valid:
 | Empty map `{}` | None | Incompatible |
 
 An incompatible value sets `badInput` and cannot satisfy `required`, even if its
-stored string is nonempty. Every matching entry is checked, so one compatible
-value cannot cancel an incompatible sibling's failure. Empty typed states do
-not undergo nonempty-value checks.
+stored string is nonempty. Every matching entry is checked, so a compatible
+value cannot cancel an incompatible sibling's failure. Empty typed states skip
+the nonempty-value checks.
 
-"Numeric rules" here means rules of type `number` or `range`. The date and time
-types have their own parsers and are not covered by this paragraph. For a
-numeric rule, an ordinary candidate's raw string is a **valid numeric string**
-if it is a [valid floating-point number] and the [rules for parsing
-floating-point number values] return a finite number rather than an error. Both
-are needed, since `1e400` has valid syntax but parsing overflows and returns an
-error. A nonempty raw string that is not a valid numeric string sets `badInput`,
-whether or not a hint recorded a number or `null`; do not run bounds or step
-checks on a partial parse.
+For `number` and `range`, a **valid numeric string** must be a
+[valid floating-point number] whose
+[parsing][rules for parsing floating-point number values] returns a finite
+number. `1e400` has valid syntax but overflows. Nonempty invalid raw strings set
+`badInput` regardless of hints, skipping bounds and step checks rather than
+using a partial parse. Date and time types use their own parsers.
 
-Presence then depends on whether the candidate is typed. A typed candidate
-(hinted number or `null`) with a nonempty invalid raw string cannot satisfy
-`required`. A hinted `null` is only skipped as empty numeric input when its raw
-string is `""`; one recorded over a nonempty invalid string, such as `1e400`, is
-invalid input, not an empty state. An untyped nonempty string retains its
-existing presence semantics, despite being invalid, so an untyped `1e400` sets
-`badInput` and counts as present. An empty string is not invalid merely because
-numeric parsing fails. Reconstructed `null` has the stored string `""` and is
-empty numeric input; JSON cannot recover whether the source was invalid or
-empty.
+Invalid nonempty strings satisfy `required` only when untyped. Typed numbers
+and `null` with invalid raw strings do not. Empty strings are not invalid merely
+because parsing fails. Hinted `null` represents empty numeric input only over
+raw `""`; reconstruction always gives it that raw string, losing the
+distinction between invalid and empty source input.
 
-The remaining checks are HTML's, with three differences, all of which follow
-from validating data instead of an element:
+The remaining checks are HTML's, with three differences that follow from
+validating data instead of an element:
 
 - **Lengths always apply.** `tooLong` and `tooShort` don't depend on how the
   value was last changed.
@@ -362,15 +301,14 @@ matching value is present:
 - `file`: a `File` with a non-empty name. The native no-selection placeholder
   remains available to validation but does not count as present.
 - `number` and `range`: a typed number whose raw string is a valid numeric
-  string, or an untyped nonempty string. Typed `null` over `""` is empty, and
-  typed `null` over a nonempty invalid raw string is not present.
+  string, or an untyped nonempty string. Typed `null` is not present.
 - `select-multiple`: a compatible string entry, including a selected option
   with `value=""`. An empty-list marker does not count as a selected option.
 - Everything else: a compatible nonempty string.
 
 Otherwise `valueMissing` is false. A false or empty contribution does not veto
-a present sibling. This is a field-level aggregation rule, not a requirement
-that every checkbox sharing a name be checked.
+a present sibling: this is field-level aggregation, not a requirement that every
+checkbox sharing a name be checked.
 
 ### Serialising
 
@@ -385,22 +323,22 @@ const copy = new FormValidation(JSON.parse(JSON.stringify(rules)));
 ### Alternatives considered
 
 - **Expose `ValidityState` everywhere and give it a constructor.** This changes
-  where the flags live, not how they're computed. The rules would still be read
-  from an element.
+  where the flags live, not how they're computed; rules would still be read from
+  an element.
 - **Static helpers**, such as a function that tests an email address. These
   cover the grammars but not `required`, step bases, `multiple`, repeated names
   or files, and give no single object to share between client and server.
-- **Adopt JSON Schema.** Its keywords would need an HTML profile, redefining
-  `pattern`, `multipleOf` and `format` to match the browser, at which point it
-  is a new vocabulary with confusing names. It also describes JSON documents,
-  not entry lists.
+- **Adopt JSON Schema.** Its keywords would need an HTML profile redefining
+  `pattern`, `multipleOf` and `format` to match the browser, making it a new
+  vocabulary with confusing names. It also describes JSON documents, not entry
+  lists.
 - **Implement Standard Schema.** Its `~standard` property is a userland
-  convention that a platform object shouldn't carry. Wrapping `FormValidation`
-  in an adapter is a few lines of library code.
+  convention that a platform object shouldn't carry. An adapter around
+  `FormValidation` is a few lines of library code.
 - **A live object bound to the form.** It couldn't be serialised or used on a
-  server, which are the main reasons for the API.
+  server, the main reasons for the API.
 - **Return a list of issues with messages.** Validation messages are localised
-  by the browser and a server runtime has no strings to localise. Returning the
+  by the browser, and a server runtime has no strings to localise. Returning
   `ValidityState` flags lets authors reuse the code they already write to map
   `element.validity` to messages.
 
@@ -506,15 +444,15 @@ const { valid, fields } = rules.validate(data);
 
 For `{"pet":[{"legs":-1}],"tag":["ox"]}`, `valid` is false, with
 `fields["pet[0][legs]"].rangeUnderflow` and `fields["tag[]"].tooShort` true.
-The tag remains an array even though it contains only one value. A missing
-`pet[0][legs]` instead produces `valueMissing` under the same rule key.
+The tag remains an array despite holding one value. A missing `pet[0][legs]`
+instead produces `valueMissing` under the same rule key.
 
 A source control named `pet[0][legs]` keeps that name, so its form-derived rule
-also matches the reconstructed entry. A source control named `tag[0]` does not.
-Its form-derived rule validates the original entry, but the reconstructed entry
+also matches the reconstructed entry. A source control named `tag[0]` does not:
+its form-derived rule validates the original entry, but the reconstructed entry
 is named `tag[]`. An error for a canonical name identifies the JSON field, not
-necessarily a control with that name. Mapping it back to the original control
-requires the submitting page's knowledge of its control names.
+necessarily a control with that name; mapping it back to the control needs the
+submitting page's knowledge of its control names.
 
 Typed presence differs from stored-string presence:
 
@@ -532,18 +470,18 @@ const untypedResult = consentRules.validate(untyped);
 `typedResult.fields.consent.valueMissing` is true. The untyped empty string
 represents a checked checkbox with an explicit empty value, so `untypedResult`
 is valid. An eligible native unchecked Boolean checkbox has no visible entry
-but supplies a JSON-only false contribution and fails `required` too.
+but supplies a JSON-only false contribution, so it fails `required` too.
 
 For an empty `<select multiple name="tag[]">`, a form-derived required rule for
 `tag[]` has type `select-multiple`, sees an empty-group contribution and reports
-missing without `badInput`.
-Reconstructing `{"tag":[]}` instead creates the canonical marker named `tag`;
-an exact-name rule for `tag` can inspect that marker. A rule for `tag[]` has no
-matching entry. A required one reports missing, while an optional one does not
-inspect the differently named marker. This API is not a JSON shape validator.
+missing without `badInput`. Reconstructing `{"tag":[]}` instead creates the
+canonical marker named `tag`, which an exact-name rule for `tag` can inspect. A
+rule for `tag[]` has no matching entry: a required one reports missing, while an
+optional one doesn't inspect the differently named marker. This API is not a
+JSON shape validator.
 
-For a required numeric rule, typed `0` is present and typed `null` over an empty
-raw string is missing. Overflow illustrates why syntax and parsing both matter.
+Typed `0` is present under a required numeric rule, and typed `null` over an
+empty raw string is missing. Overflow shows why both syntax and parsing matter.
 For `{ type: "number" }`:
 
 | Candidate | `required: true` | `required: false` |
@@ -555,62 +493,40 @@ For `{ type: "number" }`:
 A typed number under a required text rule sets both `badInput` and
 `valueMissing`. For `"consent[]": { type: "checkbox", required: true }`,
 reconstructing `{"consent":[true,{}]}` sets `badInput` but not `valueMissing`,
-because the valid `true` supplies presence but cannot hide the incompatible
+since the valid `true` supplies presence but can't hide the incompatible
 object.
 
 ## Caveats, shortcomings, and other drawbacks of design choices
 
-- **Lengths are stricter than in the browser.** A server-prefilled value that
-  breaks `maxlength` passes in the browser until the user edits it, but fails
-  `validate()`. For data validation this is the correct answer, but it is a
-  difference.
-- **`wrap="hard"` textareas can fail on the server.** The browser inserts line
-  breaks into the submitted value to wrap it, after `maxlength` was checked
-  against the unwrapped value. The inserted breaks can't be told apart from
-  typed ones, so a value near the limit may be `tooLong` on the server.
-- **No messages.** Authors map flags to text, as they do today for custom error
-  UI.
-- **Element-only validity is lost.** `setCustomValidity()`,
-  `ElementInternals.setValidity()` and custom elements have no declarative
-  rules, so the form constructor skips them. Their checks have to be repeated in
-  script.
-- **Snapshots go stale.** A form that enables, disables or adds controls in
-  script needs a new `FormValidation` after each change, or a dictionary
-  written for its final state.
-- **Only HTML's constraints.** There is no cross-field rule (password
-  confirmation), no "at least one checkbox in the group", no file size or
-  `accept` check, and no check that a `select` or radio value is one of its
-  options. These belong in script or in libraries built on top.
-- **Unknown names are ignored.** `validate()` doesn't flag entries that have no
-  rule. A server must still decide which fields it accepts.
-- **Renamed entries can miss rules.** A source-name snapshot cannot generally
-  validate canonicalised JSON entries. A required rule may report a missing
-  value; an optional rule may pass without checking the renamed entry at all.
-  Use rules for the input representation, not an independently canonicalised
-  copy of the source-name record.
-- **JSON reconstruction loses information.** It cannot recreate `File` values
-  from filenames or keep the source spelling of names. Leaf-array labels return
-  as `[]`, and quoted keys and flattened conflicts return in canonical form.
-  Empty and invalid hinted numbers both encode as `null`, including a
-  syntactically valid but overflowing value such as `1e400`. Direct validation
-  rejects the invalid raw number; after reconstruction the `null` has the raw
-  string `""`, loses that provenance, and is indistinguishable from empty
-  numeric input, which passes an optional numeric rule but fails a required
-  one.
-- **Indexed gaps stop JSON conversion.** The [JSON form encoding] treats
-  unquoted numeric labels as dense array positions. If an indexed level lacks a
-  position below its largest label, conversion throws and an `application/json`
-  or `multipart/json` submission sends nothing. `validate()` doesn't convert,
-  so it can't report this. A required rule for `pet[0][name]` reports
-  `valueMissing` when only `pet[1][name]` was submitted, while an optional rule
-  passes the same entries. An unanswered optional indexed radio group, a
-  disabled row or a row removed in script can make an otherwise valid form
-  unsendable as JSON. Authors can avoid this with the alternatives that
-  explainer's [caveats][JSON form encoding caveats] describe, such as a
-  terminal `[]` where collection semantics fit or quoted numeric keys for a
-  sparse object. That explainer also recommends an author-visible diagnostic
-  for the aborted submission before stage 2; its form is an open question
-  there, not a policy of this proposal.
+- **Stricter lengths.** Prefilled values can pass browser length checks but
+  fail data validation, which ignores edit history.
+- **`wrap="hard"` textareas.** Wrapping inserts line breaks after browser length
+  validation. The server cannot distinguish them from typed breaks and may
+  report `tooLong`.
+- **No messages.** Authors map flags to text.
+- **Element-only validity.** Custom validity and custom-element checks have no
+  declarative rules to extract and must be repeated in script.
+- **Stale snapshots.** After controls change, rebuild the snapshot or use a
+  dictionary describing the final form.
+- **Only HTML constraints.** Cross-field checks, checkbox-group minimums, file
+  size/`accept` checks and allowed option values remain script or library work.
+- **Unknown names.** Servers must decide which unruled fields to accept.
+- **Renamed entries.** Source-name rules can miss reconstructed entries,
+  producing missing-value failures or unchecked optional fields. Use rules for
+  the input representation, not an independently canonicalised source record.
+- **Lossy reconstruction.** Filenames cannot recreate files; leaf-array labels,
+  quoted keys and flattened conflicts lose their original spellings. Empty and
+  invalid hinted numbers, including `1e400`, both become `null`. Reconstruction
+  treats that as empty input, passing optional numeric rules and failing
+  required ones, rather than reporting the original `badInput`.
+- **Indexed gaps.** JSON conversion rejects missing array positions and sends
+  no `application/json` or `multipart/json` request. Validation does not convert:
+  with only `pet[1][name]`, a required `pet[0][name]` reports missing and an
+  optional rule passes. An unanswered optional indexed radio group or a disabled
+  or removed row can make an otherwise valid form unsendable as JSON. See the
+  encoding [caveats][JSON form encoding caveats] for terminal `[]` or quoted-key
+  alternatives. That explainer recommends an author-visible diagnostic before
+  stage 2 ships; its form remains open there, not a policy of this proposal.
 
 ## Open questions
 
@@ -626,16 +542,16 @@ object.
    no member for it, so the form constructor can't represent
    `<input type=number value=0.5 step=1>`. A `stepBase` member would fix this
    at the cost of a constraint name with no attribute equivalent.
-4. **Allowed values.** The form constructor could record checkbox and radio
-   values and `option` values, letting a server reject values no control could
-   send. HTML has no such constraint, and options are often added in script, so
-   this is left out.
+4. **Allowed values.** The form constructor could record checkbox, radio and
+   `option` values, letting a server reject values no control could send. HTML
+   has no such constraint, and options are often added in script, so this is
+   left out.
 5. **Custom validators.** Accepting functions would break serialisation, and
    composing `validate()` with script already covers them.
 6. **Converted results.** `validate()` could also return converted values
    (`valueAsNumber`, `valueAsDate`), which overlaps with the typed values in the
-   [JSON form encoding] explainer. Returning converted values is separate from
-   matching canonical names.
+   [JSON form encoding] explainer but is separate from matching canonical
+   names.
 7. **One rule set for both representations.** The same trusted rules must give
    the same rule targets and validity flags for original and reconstructed
    `FormData`. Dense indices preserve positions, but leaf-array labels, quoted
@@ -643,8 +559,8 @@ object.
    `{"tag":[]}` reconstructs as a marker named `tag`, while a nonempty `tag`
    array reconstructs as entries named `tag[]`, so no single exact-name rule
    inspects both (see [Examples]). The current exact-name matching does not
-   meet this requirement. How to share their structural interpretation without
-   losing raw-value checks remains open.
+   meet this requirement, and how to share the structural interpretation
+   without losing raw-value checks remains open.
 
 ## Draft specification
 

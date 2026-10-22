@@ -2,33 +2,47 @@
 
 Author: [Keith Cirkel]
 
+## Summary
+
+Place the browser's validation message next to a field, using an `<error>`
+element instead of a validation bubble. It shows the message when validation
+is requested, without script.
+
+```html
+<form>
+  <label for="email">Email</label>
+  <input id="email" name="email" type="email" required>
+  <error for="email"></error>
+  <button>Sign up</button>
+</form>
+```
+
+Style that element directly, or select it through the control's state:
+
+```css
+input:invalid::error { color: red; }
+input:user-invalid::error { font-weight: bold; }
+```
+
 ## User problems to be solved
 
-Browsers report HTML [constraint validation] problems through browser-managed
-UI, commonly a temporary bubble. Authors cannot place that message in their
-page layout or style it with the page's CSS.
+Browsers report HTML [constraint validation] problems in browser-managed UI,
+commonly a temporary bubble. Authors cannot place it in their layout or style
+it with the page's CSS.
 
-Authors who want persistent messages next to fields must read
-[`validationMessage`], decide when to reveal it, and maintain an accessible
-association with the control. They also need to update messages as validity
-changes and clear reporting state on reset. Suppressing native reporting does
-not provide any of that presentation.
-
-The browser already supplies localised messages. Authors should be able to
-reuse them in the page rather than write and translate replacements merely to
-control placement.
+Persistent in-page messages require script to read [`validationMessage`],
+control its visibility, maintain an accessible association, update it as
+validity changes and clear reporting state on reset. Authors should be able to
+reuse the browser's localised messages without rebuilding that presentation.
 
 ## Methodology for approaching & evaluating solutions
 
-We follow Mozilla's [Web Vision], which favours [declarative][Web Vision]
-features that work by default and degrade well. A good solution should:
+Follow Mozilla's [Web Vision] with a declarative feature that:
 
-1. Show the browser's constraint validation messages in the page, with no script.
-2. Keep validity in one place. The message element only displays validity.
-3. Reveal messages at the points where the browser already validates, rather
-   than adding new timing rules authors must learn.
-4. Fall back to today's behaviour in browsers without support.
-5. Be styled with ordinary CSS, without generated boxes or moving nodes.
+1. Displays existing validation messages using ordinary page layout and CSS.
+2. Leaves validity and message selection with the control.
+3. Reveals messages on explicit validation requests.
+4. Falls back to native reporting in unsupported browsers.
 
 ## Prior features and proposals
 
@@ -41,109 +55,68 @@ constraints], which fires `invalid` events but does not report.
 becomes invalid and `validationMessage` returns the custom string until it is
 set to the empty string.
 
-**[OpenUI #802].** Opened during `<selectlist>` work to ask whether validation
-errors are part of a control's anatomy. The Open UI CG resolved that it is "a
-good problem to solve, but it's independent of the `<selectlist>`. We should
-solve this generally." Comments suggested a free fallback message plus an
-author-placed element, with `<error for=IDREF_of_input>` given as an example,
-and extending `<output>` as an alternative. A later comment sketched an
-`::error` pseudo-element representing the bubble itself, styled through
-anchor positioning and `content`.
+**[OpenUI #802].** During `<selectlist>` work, the Open UI CG resolved that
+validation errors are "a good problem to solve, but it's independent of the
+`<selectlist>`. We should solve this generally." Suggestions included an
+author-placed `<error for=IDREF_of_input>`, extending `<output>`, and a
+`::error` pseudo-element for styling the bubble with anchor positioning and
+`content`.
 
-**[whatwg/html #9878].** Asks for a hook that tells a control, especially a
-form-associated custom element, when the browser is about to report its
-validity, since `invalid` fires for both `checkValidity()` and
-`reportValidity()`. It proposes a cancelable `report` event inside
-interactively validate the constraints. Later comments propose declarative
-per-constraint message elements, a target attribute pointing to a container,
-and form attributes controlling which interactions trigger reporting.
+**[whatwg/html #9878].** Proposes a cancelable `report` event so controls,
+especially form-associated custom elements, can distinguish interactive
+reporting from `checkValidity()`, since both fire `invalid`. Comments also
+propose per-constraint messages, a target container attribute and form attributes
+controlling reporting triggers.
 
 ## Flaws or limitations in existing features/proposals
 
-- Browser-managed reporting cannot participate in the author's page layout.
-- Cancelling `invalid` hides the bubble but leaves the author to rebuild
-  display, association, updating and clearing.
-- A `report` event, as in #9878, tells script when to show a message but still
-  needs script to show it.
-- Per-constraint message elements need separate message selection and
-  precedence rules when several constraints fail.
-- A pseudo-element representing a generated bubble does not provide an
-  author-placed DOM element for the message.
+- Native bubbles do not participate in page layout.
+- Cancelling `invalid` or adding a `report` event still leaves presentation to
+  script.
+- Per-constraint elements need message selection and precedence rules.
+- A generated bubble is not an author-placed DOM element.
 
 ## Motivation for this explainer
 
-Browsers already compute a message and know when validation is requested. An
-element that uses the associated control's existing validity state and message
-selection adds placement and styling without defining constraints again.
-Revealing on every explicit validation call also gives `checkValidity()` an
-in-page presentation effect when the author opts in with `<error>`.
+An element could display the control's existing message without redefining
+constraints. Opting in would also give `checkValidity()` in-page presentation.
 
 ## Proposed solution
 
-An `<error>` element with a `for` attribute naming a control by ID.
-
-```html
-<label for="email">Email</label>
-<input id="email" type="email" required>
-<error for="email"></error>
-```
-
-Behaviour:
-
-1. **Binding.** `for` names the associated control by ID. The initial proposal
-   associates each error element with one control; multiple associations and
-   shadow boundaries remain open questions.
-2. **Content.** When revealed, the element uses the same validity state and
-   message selection as [`validationMessage`]. Built-in messages must use the
-   `<error>` element's resolved language, as described below.
-3. **Custom messages.** Custom or server text comes only from
-   `setCustomValidity()` (or `ElementInternals.setValidity()` for custom
-   elements). Text authored inside `<error>` does not create, assert, or change
-   validity. There is no per-constraint message syntax and no new constraint.
-4. **Quiet until validation.** The element shows nothing until constraint
-   validation is explicitly requested for its control. Every such request
-   reveals it: `checkValidity()`, `reportValidity()`, and form submission, on
-   either the control or its form.
-5. **Replacing the bubble.** When a control has a connected associated
-   `<error>`, interactive validation shows the message there instead of in a
-   bubble. HTML's existing focusing and scrolling of the invalid control is
-   unchanged.
-6. **Lifecycle (proposed, not settled).** Once revealed, the message updates
-   live as validity changes, hides when the control becomes valid, and returns
-   to the quiet state when the form is reset.
-7. **Accessibility (proposed).** The association would expose the element as
-   the control's error message to accessibility APIs, as `aria-errormessage`
-   does. Role and announcement timing need agreement with the ARIA and
-   HTML-AAM editors.
+1. **Binding.** `for` identifies one control by ID. Multiple associations and
+   shadow boundaries remain open.
+2. **Content.** Revealed errors use the control's validity and message selection
+   as [`validationMessage`] does, localising built-in text to the error's language.
+3. **Custom messages.** Only `setCustomValidity()` or
+   `ElementInternals.setValidity()` supplies custom or server errors. Child
+   text does not change validity; no new constraints or per-constraint syntax
+   are added.
+4. **Reveal.** The element shows nothing until explicit validation, including
+   control- or form-level `checkValidity()`, `reportValidity()` and submission.
+5. **Reporting.** A connected associated `<error>` replaces the native bubble,
+   retaining HTML's focus and scroll behaviour.
+6. **Lifecycle (proposed, not settled).** Revealed messages update with validity,
+   hide when valid and return to unrevealed state on reset.
+7. **Accessibility (proposed).** The association would expose the error-message
+   relationship as `aria-errormessage` does. Role and announcements need agreement
+   with ARIA and HTML-AAM editors.
 
 ### Message language and privacy
 
-Built-in messages must be localised using the `<error>` element's resolved
-language, including an inherited `lang`, rather than the browser or operating
-system's locale. This follows the [localised `<time>` proposal], which uses
-the element's language for formatting.
+Built-in messages must use the `<error>` element's resolved language, including
+inherited `lang`, following the [localised `<time>` proposal]. Changing that
+language updates a revealed message. Formatting and fallback for missing,
+unknown or unsupported languages must not depend on the user's browser or
+operating system locale or expose that preference.
 
-Changing the resolved language must update a revealed built-in message.
-Fallback for a missing, unknown or unsupported language must not depend on the
-user's locale either. The rendered message must not expose that preference.
-Custom messages from `setCustomValidity()` or `ElementInternals.setValidity()`
-remain unchanged; authors are responsible for their language. This proposal
-does not change the existing `validationMessage` getter.
+Custom messages remain unchanged; authors choose their language. The existing
+`validationMessage` getter is unchanged.
 
 ### The `::error` pseudo-element
 
-`input::error` selects the `<error>` element associated with that input. It
-matches a real element instead of generating an error box. It does not
-reparent the element or change inheritance, so the `<error>` stays in its tree
-position and inherits from its own parent. If a control has no associated
-`<error>`, `::error` matches nothing.
-
-This lets state on the control drive the message's styles:
-
-```css
-input:invalid::error { color: red; }
-input:user-invalid::error { font-weight: bold; }
-```
+`input::error` selects the input's associated `<error>`, or nothing if none
+exists. It generates no box and changes neither tree position nor inheritance.
+Control state can drive its styles, as in the opening example.
 
 `::error` applies to the same set of controls as `for` binding: `input`,
 `textarea`, `select`, and form-associated custom elements.
@@ -167,9 +140,8 @@ the `minlength` message and a second character hides it.
 
 ### Server-side error
 
-This example assumes an endpoint that returns a JSON `message` when a username
-is rejected. Script stores that message as a custom error. An input listener
-clears it on the next edit so the next submission can reach the server.
+The endpoint returns a JSON `message` for a rejected username. Script sets it
+as a custom error and clears it on the next edit to allow resubmission.
 
 ```html
 <form id="signup" action="/signup" method="post">
@@ -213,32 +185,24 @@ clears it on the next edit so the next submission can reach the server.
 </script>
 ```
 
-The example uses the provisional method in [form submission state] to track
-the request without changing the error element's role. The value comparison
-avoids applying an old response to a field edited while the request was pending.
+The provisional method in [form submission state] tracks the request. Comparing
+values avoids applying a stale response after an edit.
 
-The `<error>` element does not clear custom errors itself. Leaving a stale
-`setCustomValidity()` string in place keeps the control invalid and blocks the
-next submission. The response shape is the author's; this proposal defines no
-transport format. Pages without script cannot set a custom error, so a
-server-rendered page has no way to put the control into a custom-error state.
-This proposal does not solve that case. [FormValidation] separately proposes
-running HTML's built-in constraints on the server; it does not supply business
+`<error>` does not clear custom validity. A stale error blocks resubmission.
+Response formats remain author-defined, and script is still needed to set
+custom errors; server-rendered custom-error state is not solved here.
+[FormValidation] separately covers server-side HTML constraints, not business
 rules such as username availability.
 
 ## Caveats, shortcomings, and other drawbacks of design choices
 
-- Older browsers render `<error>` as an unknown inline element. Since it is
-  empty until revealed, it shows nothing and the bubble appears as today.
-  Authors who put fallback text inside it will see that text in old browsers.
-- Revealing on `checkValidity()` changes what that method does from the
-  user's point of view. A script calling it to test validity will now display
-  messages for controls that have an `<error>`. Today it only fires `invalid`.
-- `validationMessage` is one string and may describe one or more failed
-  constraints. The element adds no structured list of individual failures.
-- The element displays the control's validation message, localised as described
-  above. It does not map the results of a `FormValidation` run, or any other
-  external result, onto controls.
+- Unsupported browsers render `<error>` as an unknown inline element. Empty
+  elements leave native bubbles unchanged; authored fallback text is visible.
+- `checkValidity()` would reveal associated errors, where today it only fires
+  `invalid`. Scripts using it to test validity would change visible behaviour.
+- Messages remain single strings, not structured lists of failed constraints.
+- The element does not apply external results, including `FormValidation`, to
+  controls.
 
 ## Open questions
 
@@ -266,29 +230,21 @@ rules such as username availability.
 
 ## Draft specification
 
-Proposed changes to the HTML Standard:
-
-1. Define `<error>` with a `for` attribute and an IDL reflector. As an initial
-   proposal, resolve the ID in the same tree to an eligible control; exact
-   eligibility, multiplicity and shadow-boundary rules remain to be agreed.
-2. Give each `<error>` element a *revealed* flag, initially false.
-3. Extend control-level and form-level constraint validation, including
-   `checkValidity()` and `reportValidity()`, to reveal associated errors.
-   Whether cancelling `invalid` suppresses this reveal remains open.
-4. In interactively validate the constraints, when reporting a problem for a
-   control with a connected associated `<error>`, do not show the UA's own
-   report for that control.
-5. While revealed, render the associated control's validation message, using
-   the `<error>` element's resolved language for built-in messages. Update it
-   when that language changes. Language fallback must be independent of the
-   user's browser or operating system locale. Preserve custom messages
-   unchanged, and render nothing when there is no message.
-6. On form reset, clear the revealed flag of every `<error>` associated with
-   the form's controls.
-7. In CSS, define `::error` on `input`, `textarea`, `select` and
-   form-associated custom elements as selecting the associated `<error>`
-   element, with no generated box and no change to the element's tree
-   position or inheritance.
+1. Define `<error>` with `for` and an IDL reflector. Initially resolve IDs in
+   the same tree; eligibility, multiplicity and shadow boundaries remain open.
+2. Add a *revealed* flag, initially false.
+3. Reveal on control- or form-level validation, including `checkValidity()` and
+   `reportValidity()`. The effect of cancelling `invalid` remains open.
+4. When a control has a connected associated `<error>`, use it instead of native
+   interactive reporting for that control.
+5. While revealed, display the control's validation message, or nothing if
+   absent. Localise built-in text using the element's resolved language and
+   update on language changes. Fallback must not depend on user locale; custom
+   messages remain unchanged.
+6. Clear associated revealed flags on form reset.
+7. Define `::error` on `input`, `textarea`, `select` and form-associated custom
+   elements to select the associated element without generating a box or
+   changing its position or inheritance.
 
 ## Incubation and/or standardization destination
 
