@@ -109,7 +109,7 @@ Weekly download figures are from api.npmjs.org for 2026-09-22 to 2026-09-28.
 ## Flaws or limitations in existing features/proposals
 
 The existing API requires elements rather than received entries. Shipping a DOM
-to the server is heavy. Element validity also depends on interaction:
+to the server is heavy. Element validity also depends on interaction.
 [`maxlength`] and `minlength` apply only when the "value was last changed by a
 user edit (as opposed to a change made by a script)", so prefilled values pass
 even in the browser.
@@ -170,11 +170,12 @@ proposal's `FormData.fromJSON()` instead produces canonical names:
 | Original entries                         | Canonical names                            |
 | ---------------------------------------- | ------------------------------------------ |
 | `pet[0][name]` and `pet[1][name]`        | Unchanged                                  |
+| `pet["01"]`, a quoted digit key          | Unchanged                                  |
 | `pet[0]["name"]`                         | `pet[0][name]`                             |
 | `tag[0]`, containing a scalar            | `tag[]`                                    |
-| Two entries named `tag`                   | Two entries named `tag[]`                  |
-| `error[bad`, an invalid path              | `["error[bad"]`                            |
-| `mix` alongside `mix[key]`                | `mix` and `["mix[key]"]`                   |
+| `kids[1]` and `kids[0]`, scalars         | Two entries named `kids[]`, in label order |
+| Two entries named `tag`                  | None: conversion throws a `TypeError`      |
+| `mix` alongside `mix[key]`               | None: conversion throws a `TypeError`      |
 | `pet[5][name]`, with no other pet        | None: conversion throws a `TypeError`      |
 
 Rules for reconstructed JSON must use those canonical names. A rule for
@@ -182,15 +183,15 @@ Rules for reconstructed JSON must use those canonical names. A rule for
 `[]` is part of the exact name, not a wildcard, so `pet[][name]` does not match
 `pet[0][name]`. Quoted numeric object keys remain distinct from array indices.
 
-Canonicalisation needs the complete structure. Array elements determine whether
-names use `[]`, leaf arrays merge names, and unruled entries can cause conflicting
-paths to stay flat. Gapped indices fail conversion. Neither constructor
-canonicalises rule keys independently, which could retarget them.
+Canonicalisation needs the complete structure, since array elements decide
+whether names use `[]`. Gaps, conflicts and repeated names fail conversion;
+quoted numeric keys can represent sparse records as JSON objects instead.
+Neither constructor canonicalises rule keys independently, which could retarget
+them.
 
-With current exact-name matching, source-name rules check original entries and
+With exact-name matching, source-name rules check original entries and
 canonical-name rules check `FormData.fromJSON()` entries. Sharing one rule set
-across that round trip remains [unresolved](#open-questions). Quoted numeric
-keys can represent sparse records as JSON objects rather than arrays.
+across that round trip remains [unresolved](#open-questions).
 
 ### Constructing from a form
 
@@ -208,13 +209,13 @@ record. For each of the form's listed elements, in tree order:
    any radio in the group is, matching HTML.
 4. If another control already produced constraints for the same name, and they
    differ, throw a `"NotSupportedError"` `DOMException`. Identical constraints
-   merge, which covers the common cases: checkbox groups and repeated rows such
+   merge, covering the common cases of checkbox groups and repeated rows such
    as `name="items[]"`.
 
-This snapshots source names and constraints, not successful entries: unchecked
-required controls still contribute rules. Later form changes do not update it,
-and it does not translate names for JSON submission. Workers expose the
-interface but have no form to pass to this overload.
+This snapshots source names and constraints, not successful entries, so
+unchecked required controls still contribute rules. Later form changes do not
+update it, and it does not translate names for JSON submission. Workers expose
+the interface but have no form to pass to this overload.
 
 ### Validating
 
@@ -234,15 +235,15 @@ Each field has [`ValidityState`] flags except `customError`, which has no data
 equivalent. Result keys are exactly the rule keys, including those without
 entries; unruled entries are ignored.
 
-Rules match ordinary entries by stored name and active JSON-only empty-state
-contributions by original source name. The [JSON form encoding] activation
-rules apply; contributions remain invisible to public getters and legacy
-encodings. Validation neither converts to JSON nor canonicalises names.
+Rules match entries by stored name. They also match the JSON-only `false` and
+empty-list states from [JSON form encoding] by source name, whenever that
+proposal would produce them. Those states stay hidden from public getters and
+legacy encodings. Validation neither converts to JSON nor canonicalises names.
 
-Checks retain the raw string or `File` and optional internal JSON value.
-Untyped entries use HTML's string/file semantics; typed values follow this
-table without arbitrary coercion. "Present" means able to satisfy `required`,
-not necessarily valid:
+Each check sees the raw string or `File`, plus any internal JSON value. Untyped
+entries follow HTML's string and file rules; typed values follow this table,
+with no other coercion. "Present" means the value can satisfy `required`,
+whether or not it is valid:
 
 | Internal JSON value | Compatible rule types | Presence and checks |
 | ------------------- | --------------------- | ------------------- |
@@ -266,11 +267,11 @@ number. `1e400` has valid syntax but overflows. Nonempty invalid raw strings set
 `badInput` regardless of hints, skipping bounds and step checks rather than
 using a partial parse. Date and time types use their own parsers.
 
-Invalid nonempty strings satisfy `required` only when untyped. Typed numbers
-and `null` with invalid raw strings do not. Empty strings are not invalid merely
-because parsing fails. Hinted `null` represents empty numeric input only over
-raw `""`; reconstruction always gives it that raw string, losing the
-distinction between invalid and empty source input.
+Invalid nonempty strings satisfy `required` only when untyped, not when hinted
+as a number or `null`. A failed parse doesn't make an empty string invalid.
+Hinted `null` means empty numeric input only when the raw string is `""`.
+Reconstruction always uses `""`, so it can't tell invalid source input from
+empty.
 
 The remaining checks are HTML's, with three differences that follow from
 validating data instead of an element:
@@ -306,15 +307,15 @@ matching value is present:
   with `value=""`. An empty-list marker does not count as a selected option.
 - Everything else: a compatible nonempty string.
 
-Otherwise `valueMissing` is false. A false or empty contribution does not veto
-a present sibling: this is field-level aggregation, not a requirement that every
-checkbox sharing a name be checked.
+Otherwise `valueMissing` is false. `required` is checked per field, so a false
+or empty contribution doesn't cancel a present sibling, and one checked
+checkbox satisfies it for every checkbox sharing the name.
 
 ### Serialising
 
-`toJSON()` returns the flat rule record with its keys unchanged, so the rules
-can be stored or sent with `JSON.stringify()` and rebuilt with the constructor.
-It does not apply `FormData`'s entry-name canonicalisation or nest the rules:
+`toJSON()` returns the flat rule record with its keys unchanged, neither
+canonicalised nor nested, so the rules can be stored or sent with
+`JSON.stringify()` and rebuilt with the constructor:
 
 ```js
 const copy = new FormValidation(JSON.parse(JSON.stringify(rules)));
@@ -447,12 +448,12 @@ For `{"pet":[{"legs":-1}],"tag":["ox"]}`, `valid` is false, with
 The tag remains an array despite holding one value. A missing `pet[0][legs]`
 instead produces `valueMissing` under the same rule key.
 
-A source control named `pet[0][legs]` keeps that name, so its form-derived rule
-also matches the reconstructed entry. A source control named `tag[0]` does not:
-its form-derived rule validates the original entry, but the reconstructed entry
-is named `tag[]`. An error for a canonical name identifies the JSON field, not
-necessarily a control with that name; mapping it back to the control needs the
-submitting page's knowledge of its control names.
+A control named `pet[0][legs]` keeps that name, so its form-derived rule also
+matches the reconstructed entry. A control named `tag[0]` does not, since the
+reconstructed entry is named `tag[]`, so its form-derived rule only checks the
+original entry. An error under a canonical name identifies the JSON field, which
+may not match any control's name. Only the submitting page knows how to map it
+back to a control.
 
 Typed presence differs from stored-string presence:
 
@@ -469,16 +470,15 @@ const untypedResult = consentRules.validate(untyped);
 
 `typedResult.fields.consent.valueMissing` is true. The untyped empty string
 represents a checked checkbox with an explicit empty value, so `untypedResult`
-is valid. An eligible native unchecked Boolean checkbox has no visible entry
-but supplies a JSON-only false contribution, so it fails `required` too.
+is valid. An enabled, unchecked checkbox without a `value` attribute has no
+visible entry but contributes a JSON-only `false`, so it fails `required` too.
 
-For an empty `<select multiple name="tag[]">`, a form-derived required rule for
-`tag[]` has type `select-multiple`, sees an empty-group contribution and reports
-missing without `badInput`. Reconstructing `{"tag":[]}` instead creates the
-canonical marker named `tag`, which an exact-name rule for `tag` can inspect. A
-rule for `tag[]` has no matching entry: a required one reports missing, while an
-optional one doesn't inspect the differently named marker. This API is not a
-JSON shape validator.
+Take an empty `<select multiple name="tag[]">`. A required form-derived rule for
+`tag[]` has type `select-multiple`, sees the empty-group contribution and
+reports `valueMissing` without `badInput`. Reconstructing `{"tag":[]}` instead
+creates a marker named `tag`, which only a rule for `tag` inspects. A rule for
+`tag[]` finds no entry, so it reports missing if required and passes otherwise.
+`FormValidation` doesn't validate JSON shape.
 
 Typed `0` is present under a required numeric rule, and typed `null` over an
 empty raw string is missing. Overflow shows why both syntax and parsing matter.
@@ -514,19 +514,18 @@ object.
 - **Renamed entries.** Source-name rules can miss reconstructed entries,
   producing missing-value failures or unchecked optional fields. Use rules for
   the input representation, not an independently canonicalised source record.
-- **Lossy reconstruction.** Filenames cannot recreate files; leaf-array labels,
-  quoted keys and flattened conflicts lose their original spellings. Empty and
-  invalid hinted numbers, including `1e400`, both become `null`. Reconstruction
-  treats that as empty input, passing optional numeric rules and failing
-  required ones, rather than reporting the original `badInput`.
+- **Lossy reconstruction.** Filenames cannot recreate files, and leaf-array
+  labels and quoted keys lose their original spellings. Empty and invalid
+  hinted numbers, including `1e400`, both become `null`. Reconstruction treats
+  that as empty input, passing optional numeric rules and failing required
+  ones, rather than reporting the original `badInput`.
 - **Indexed gaps.** JSON conversion rejects missing array positions and sends
-  no `application/json` or `multipart/json` request. Validation does not convert:
-  with only `pet[1][name]`, a required `pet[0][name]` reports missing and an
-  optional rule passes. An unanswered optional indexed radio group or a disabled
-  or removed row can make an otherwise valid form unsendable as JSON. See the
-  encoding [caveats][JSON form encoding caveats] for terminal `[]` or quoted-key
-  alternatives. That explainer recommends an author-visible diagnostic before
-  stage 2 ships; its form remains open there, not a policy of this proposal.
+  no `application/json` or `multipart/json` request. Validation doesn't convert,
+  so with only `pet[1][name]`, a required `pet[0][name]` reports missing and an
+  optional rule passes. A row removed by script can make an otherwise valid
+  form unsendable as JSON. See the encoding [caveats][JSON form encoding
+  caveats] for quoted-key alternatives. That explainer recommends an
+  author-visible diagnostic before stage 2 ships and leaves its form open.
 
 ## Open questions
 
@@ -554,13 +553,13 @@ object.
    names.
 7. **One rule set for both representations.** The same trusted rules must give
    the same rule targets and validity flags for original and reconstructed
-   `FormData`. Dense indices preserve positions, but leaf-array labels, quoted
-   keys and flattened conflicts still change entry names. For example,
-   `{"tag":[]}` reconstructs as a marker named `tag`, while a nonempty `tag`
-   array reconstructs as entries named `tag[]`, so no single exact-name rule
-   inspects both (see [Examples]). The current exact-name matching does not
-   meet this requirement, and how to share the structural interpretation
-   without losing raw-value checks remains open.
+   `FormData`. Dense indices preserve positions, but leaf-array labels and
+   quoted keys still change entry names. For example, `{"tag":[]}`
+   reconstructs as a marker named `tag`, while a nonempty `tag` array
+   reconstructs as entries named `tag[]`, so no single exact-name rule inspects
+   both (see [Examples]). Exact-name matching doesn't meet this, and how to
+   share the structural interpretation without losing raw-value checks remains
+   open.
 
 ## Draft specification
 
@@ -624,8 +623,8 @@ can't diverge. This also gives [whatwg/html#4562] a single place to change
 email validity.
 
 Each `FormValidation` has a **rule map**, an ordered map from entry-name strings
-to constraint sets. Names are compared exactly, without parsing bracket paths,
-merging canonical names or flattening conflicts.
+to constraint sets. Names are compared exactly, without parsing bracket paths
+or canonicalising them.
 
 The **`new FormValidation(init)`** constructor steps are:
 
@@ -651,9 +650,10 @@ The **`validate(data)`** method steps are:
       _name_. Do not convert the entry list to JSON or replace its names with
       canonical names.
    2. Let _result_ be a `FormFieldValidity` with every flag false.
-   3. Append each active empty-state contribution whose original source name
-      is _name_ to _entries_, using the encoding proposal's activation rules.
-      Keep ordinary entries, including native no-selection file placeholders.
+   3. Append each active false or empty-list contribution whose original
+      source name is _name_ to _entries_, using the encoding proposal's
+      activation rules. Keep ordinary entries, including native no-selection
+      file placeholders.
    4. Let _present_ be false.
    5. For each candidate of _entries_:
       1. Retain its raw string or `File` and optional JSON value. A contribution
