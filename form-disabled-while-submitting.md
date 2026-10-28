@@ -59,8 +59,8 @@ callers, and neither approach works without script.
 
 ## Motivation for this explainer
 
-The browser can disable controls after capturing the payload and restore them
-when the [submission lifetime] ends. A keyword would make this declarative.
+The browser can disable controls for the [submission lifetime] without omitting
+their values from native submission. A keyword would make this declarative.
 
 ## Proposed solution
 
@@ -81,8 +81,17 @@ The shared [form submission state explainer][submission lifetime] defines
 submitting as having any pending native submission or promise registered with
 the provisional `form.trackSubmission(promise)` method.
 
-Conditional disabling applies only after the triggering submission's payload
-has been captured, preserving its controls' values. See
+Conditional disabling applies after `submit` dispatch, before waiting for any
+[submission holds][submission hold]. If `submit()` bypasses dispatch, apply it
+before native entry construction. Controls remain disabled through the hold
+and subsequent submission, until every pending contribution has settled.
+
+For the triggering native attempt, conditional disabling prevents interaction
+without excluding controls from post-hold constraint validation or the payload.
+Those operations ignore disabling caused solely by `while-submitting`,
+including through a conditional fieldset or form. Ordinary disabling and other
+eligibility rules still apply. Values are captured after holds and repeated
+validation, not frozen when controls disable. See
 [preserving the submission entry list] for native and scripted ordering.
 
 Other `disabled` values, including the empty string, mean unconditional
@@ -93,8 +102,9 @@ Controls without the keyword remain usable unless disabled through their
 fieldset or form. To keep Cancel usable, leave it outside the disabled group
 and keep the form enabled. Cancellation itself still requires author code.
 
-Failed interactive validation adds no pending work, leaving an idle form's
-controls enabled and any existing work unaffected.
+Failed initial interactive validation adds no pending work, leaving an idle
+form's controls enabled and any existing work unaffected. Failed validation
+after a hold ends only that attempt's native contribution.
 
 ## Examples
 
@@ -146,9 +156,9 @@ the payload includes the `state` of the pressed button.
 </form>
 ```
 
-The text input, checkbox and submit input become disabled after their entries
-have been captured. The request includes `displayName=Keith`, `updates=on`
-and `action=Save`; the user cannot change the fields while it is pending.
+The text input, checkbox and submit input become disabled after `submit`
+dispatch. The request still includes `displayName=Keith`, `updates=on` and
+`action=Save`; the user cannot change the fields while it is pending.
 
 ### A group of controls
 
@@ -182,7 +192,8 @@ stays usable. As with an ordinary disabled fieldset, controls inside its first
 ```
 
 The form disables all its controls, including the checkbox outside it, after
-capturing their entries. No control needs its own conditional attribute.
+`submit` dispatch. Their values still reach the server. No control needs its
+own conditional attribute.
 
 ### Script-driven submission
 
@@ -250,13 +261,16 @@ promises. These hooks remain open in the shared explainer.
    independently.
 3. Make `:disabled` and accessibility reflect effective state on controls,
    fieldsets and forms.
-4. In the [form submission algorithm], mark native work pending after entry
-   capture, then apply conditional disabling as defined in
-   [preserving the submission entry list].
+4. In the [form submission algorithm], apply conditional disabling after the
+   submission-event phase, before waiting for holds or constructing entries,
+   including when `submit()` skips that phase. For the triggering native
+   attempt's repeated validation and entry construction, ignore disabling
+   caused solely by `while-submitting`, as defined in
+   [preserving the submission entry list]. Ordinary disabling still applies.
 
-The shared explainer defines pending contributions, failed validation and
-cancellation. Native completion and restoration hooks must be resolved before
-their effect on disabling becomes normative.
+The shared explainer defines pending contributions, submission holds, failed
+validation and cancellation. Native completion and restoration hooks must be
+resolved before their effect on disabling becomes normative.
 
 ## Incubation and/or standardization destination
 
@@ -278,3 +292,4 @@ alongside [form submission state](form-submission-state.md). Related work:
 [`useFormStatus`]: https://react.dev/reference/react-dom/hooks/useFormStatus
 [submission lifetime]: form-submission-state.md#submission-lifetime
 [preserving the submission entry list]: form-submission-state.md#preserving-the-submission-entry-list
+[submission hold]: form-submission-state.md#holding-native-submission

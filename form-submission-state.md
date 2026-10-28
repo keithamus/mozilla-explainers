@@ -8,6 +8,10 @@ Register a scripted submission's promises with its form. The form stays
 submitting until native submission and every registered promise have settled,
 even if one rejects.
 
+An opt-in hold delays native submission until asynchronous checks finish. This
+lets an author check username availability through a separate endpoint, then
+continue the original submission without replacing it with `fetch()`.
+
 ```js
 const form = document.querySelector("form");
 form.addEventListener("submit", event => {
@@ -39,9 +43,10 @@ first operation failed.
 
 - Let script share submission state, preserving validation, submitter selection
   and the `submit` event.
-- Keep cancellation explicit. Tracking work must not send a request or cancel
-  the default action.
+- Keep ordinary tracking independent of the default action. Only an explicit
+  hold may delay or prevent native submission.
 - Track pending work independently of success or failure.
+- Let asynchronous validation gate native submission without restarting it.
 - Reuse promises without adding result, transport, timeout or cancellation APIs.
 - Share the native and scripted lifecycle with [conditional disabling].
 
@@ -49,7 +54,7 @@ first operation failed.
 
 - HTML's [form submission algorithm] validates controls, fires `submit`, builds
   the payload and submits. Listeners can cancel it but cannot register
-  replacement asynchronous work.
+  asynchronous checks that delay its continuation.
 - `requestSubmit()` runs validation and fires `submit`; `submit()` bypasses
   both. Neither registers an existing promise.
 - An `async` listener's returned promise does not extend event dispatch or
@@ -65,6 +70,10 @@ response available, but body consumption and page updates may still be pending.
 A local `finally` handler can restore controls too early; combining promises
 works only when one caller owns every operation.
 
+Asynchronous validation currently requires cancelling submission, checking the
+result, then submitting again. `requestSubmit()` repeats validation and the
+`submit` event, requiring a guard against another check; `submit()` skips both.
+
 ## Motivation for this explainer
 
 [JSON form encoding] and [FormValidation] address payloads and constraints.
@@ -74,11 +83,17 @@ without making those APIs responsible for transport.
 ## Proposed solution
 
 Add a promise-taking method to `HTMLFormElement`. This explainer uses
-`trackSubmission(promise)` as a working spelling; the name is not settled.
+`trackSubmission(promise, { hold: false })` as a working spelling; the name is
+not settled.
 
-It registers work without cancelling submission, validating, constructing a
-request or interpreting the promise's value. Replacing native submission still
-requires `preventDefault()`.
+Ordinary tracking registers work without delaying or cancelling submission,
+validating, constructing a request or interpreting the promise's value.
+Replacing native submission still requires `preventDefault()`.
+
+With `{ hold: true }`, the promise also gates the current native submission.
+It must be registered synchronously during that attempt's `submit` dispatch;
+registration outside that window throws `InvalidStateError`. Returning a
+promise from an event listener does not register a hold.
 
 ### Submission lifetime
 
@@ -87,27 +102,72 @@ Cancelling the default action completes only the native contribution; otherwise
 native and registered work both contribute.
 
 The form remains submitting until **all contributions have settled**. Rejection
-ends only that promise's contribution; it neither clears other work nor cancels
-or retries requests. Fulfilment values and rejection reasons do not affect this
+ends that promise's contribution without clearing other pending work or
+cancelling requests already sent. For ordinary tracking it has no effect on
+native submission; a rejected hold prevents that attempt from proceeding.
+
+The pending state follows `Promise.allSettled()` rather than `Promise.all()`,
+without adding a results API. Callers retain their promises and handle results
+and failures. Fulfilment values and rejection reasons do not determine pending
 state. An auxiliary failure can therefore be shown while an order POST keeps
 the form busy.
 
-This follows `Promise.allSettled()` rather than `Promise.all()`, without adding
-a results API. Callers retain their promises and handle results and failures.
-The examples register synchronously during `submit`; the allowed registration
-window remains open.
+### Holding native submission
+
+After an uncancelled `submit` dispatch, pause before constructing the payload
+if any holds were registered. No submission request or navigation starts while
+the attempt is held. Ordinary tracked promises do not delay this continuation.
+
+Continue only after every hold fulfils. First rerun interactive constraint
+validation unless validation is bypassed by `novalidate` or the submitter's
+`formnovalidate`. This lets a check set a control's custom validity and fulfil
+normally, using the browser's validation UI for an unavailable username.
+An invalid result ends the attempt without sending its submission request.
+Fulfilment values, including `false`, are not interpreted as validation results.
+
+Resume the original attempt without redispatching `submit` or calling
+`requestSubmit()`. Keep its submitter and apply that submitter's submission
+overrides through the native algorithm. Recheck whether the form can navigate
+after waiting.
+
+Any rejected hold prevents the attempt from continuing, including when a
+validation request fails. The native contribution ends, but every remaining
+promise still contributes until it settles. `preventDefault()` also ends the
+native contribution; no later settlement may revive a cancelled attempt.
+
+A hold begins pending state when registered. [Conditional disabling] applies
+after `submit` dispatch, before waiting for holds. Controls covered by the
+keyword cannot be edited by the user during the hold; uncovered controls and
+script can still change values. Authors must reject stale checks rather than
+submit a new value using an earlier value's result. The precise boundary
+between validation, edits and payload capture remains an open question.
 
 ### Preserving the submission entry list
 
-[Conditional disabling] must preserve the triggering submission's payload.
-Native submission builds it after `submit`, so conditional disabling must wait
-until it has been captured. Disabling earlier would omit controls' values.
+[Conditional disabling] applies after `submit` dispatch, including while holds
+are pending. If `submit()` bypasses dispatch, apply it at the corresponding
+point before native entry construction. It prevents interaction but must not
+remove controls from the triggering native submission's payload or post-hold
+constraint validation. Those operations ignore disabling caused solely by
+`while-submitting`, including disabling inherited from a conditional fieldset
+or form.
 
-When script cancels native submission, conditional disabling applies after
+Ordinary disabling still applies. A control independently disabled by script
+or an ordinary disabled fieldset remains excluded under HTML's existing rules.
+Other eligibility rules, such as which submitter contributes an entry, are
+unchanged. This is not a snapshot; capture current values after holds and
+repeated validation, without temporarily re-enabling controls.
+
+When script cancels native submission, conditional disabling also applies after
 `submit` dispatch. A listener can first capture
-`new FormData(form, event.submitter)` synchronously. Ordinary disabling by a
-listener still affects the payload under HTML's existing rules. This proposal
-neither freezes fields nor captures data for script.
+`new FormData(form, event.submitter)` synchronously. The exception above is for
+the triggering native attempt, not arbitrary later `FormData` construction or
+validation API calls, which still observe effective disabled state.
+
+Repeated validation must report errors on conditionally disabled controls.
+It does not enable or focus a disabled control while another contribution
+keeps the form submitting. Once the submission lifetime ends, conditional
+disabling ends and the user can correct the fields.
 
 ### Errors and cancellation
 
@@ -174,24 +234,85 @@ continue. Other registered or native work remains pending independently. To
 track both operations through settlement, register them separately or use
 `Promise.allSettled([upload, save])`.
 
+For holds, register checks separately if each rejection must prevent
+submission. `Promise.allSettled()` always fulfils, so using it as a hold would
+not propagate a failed check to the gate.
+
+### Checking a username before native submission
+
+This example assumes a form with a named `username` input and a
+`#username-status` status element. The validation endpoint returns JSON with a
+`message` string, empty when the username is available.
+
+```js
+const form = document.querySelector("form");
+const username = form.elements.namedItem("username");
+const status = document.querySelector("#username-status");
+
+username.addEventListener("input", () => {
+  username.setCustomValidity("");
+  status.textContent = "";
+});
+
+form.addEventListener("submit", () => {
+  const value = username.value;
+  status.textContent = "Checking username.";
+
+  const check = (async () => {
+    const query = new URLSearchParams({ username: value });
+    const response = await fetch(`/validate-username?${query}`);
+    if (!response.ok) {
+      throw new Error(`Request failed (${response.status})`);
+    }
+    const { message } = await response.json();
+    if (username.value !== value) {
+      throw new Error("Username changed. Submit again.");
+    }
+    username.setCustomValidity(message);
+    status.textContent = "";
+  })();
+
+  form.trackSubmission(check, { hold: true });
+  check.catch(error => {
+    status.textContent = error.message;
+  });
+});
+```
+
+No `preventDefault()` is needed. An available username permits native
+submission; an unavailable username is reported by repeated constraint
+validation. A failed request or a changed username rejects the hold. Clearing
+custom validity on input allows a corrected value to reach the next `submit`
+event instead of being blocked by the previous error.
+
+The example checks for edits before applying the response. Edits after that
+check and overlapping attempts still need the lifecycle rules discussed below.
+The submission endpoint must validate again, since availability can change
+between the check and submission.
+
 ## Caveats, shortcomings, and other drawbacks of design choices
 
 - Slow or hung work delays re-enabling controls, even after an error. Register
   only work whose lifetime should affect submission.
 - Fetch fulfilment does not establish HTTP success. Authors interpret responses.
-- Tracking does not restore native navigation, history, focus or rendering.
+- Ordinary tracking does not restore native navigation, history, focus or
+  rendering after `preventDefault()`. Holds preserve native submission instead.
 - Native completion must cover downloads, HTTP 204, cancellation and other
   target contexts, not just document replacement.
 - Restoration must distinguish obsolete native work from still-relevant script
   work; that lifecycle remains open.
 - Completion guarantees neither exactly-once execution nor server rollback.
+- A hold can postpone native submission indefinitely. There is no automatic
+  timeout or retry, so conditionally disabled controls can remain unavailable.
+- Holds require review of delayed submissions to other targets, including
+  interactions with transient user activation.
 
 ## Open questions
 
 1. **Method name and return value.** The working spelling is not a settled API.
-2. **Registration window.** Must registration occur during synchronous `submit`
-   dispatch, or can script register work outside it? An `async` listener's
-   returned promise alone must not implicitly register anything.
+2. **Ordinary registration window.** Must ordinary tracking occur during
+   synchronous `submit` dispatch, or can script register work outside it?
+   Holds are restricted to synchronous dispatch for the current attempt.
 3. **Overlapping attempts.** How should contributions be associated with attempts
    if a form is submitted again while work remains pending? A completion from
    an older attempt must not clear independently pending work from a newer one.
@@ -203,18 +324,35 @@ track both operations through settlement, register them separately or use
    failure reporting without duplicating an application's own handling?
 7. **Document lifecycle.** How do detachment, adoption, page replacement and
    back/forward-cache restoration affect registered work?
+8. **Edits during a hold.** How should validation results be tied to the values
+   eventually submitted, including edits after a check fulfils? Reset does not
+   cancel work, so authors also need to guard against results made stale by reset.
+9. **Delayed native actions.** How do holds interact with target selection,
+   transient user activation and `method="dialog"`?
 
 ## Draft specification
 
 Associate native work and registered promises with the form. It is submitting
 while any contribution is pending; completing one must leave others intact.
 
-Failed validation creates no native contribution. Cancelling `submit` completes
-only the native contribution. Reset changes controls without cancelling work
-or settling registered promises. Apply conditional disabling after entry capture.
+Failed initial validation creates no native contribution. Cancelling `submit`
+completes only the native contribution. Reset changes controls without
+cancelling work or settling registered promises.
 
-Native completion, registration windows and overlapping attempts must be
-resolved before this becomes normative.
+Accept holds only during synchronous `submit` dispatch and associate them with
+that attempt. After uncancelled dispatch, wait for every hold to fulfil before
+repeating applicable interactive validation and continuing native submission
+without another `submit` event. A rejected hold or failed repeated validation
+ends the native contribution without clearing pending promises.
+
+Apply conditional disabling after the submission-event phase, before waiting
+for holds or constructing entries, including when `submit()` skips that phase.
+For the triggering native attempt's repeated validation and entry construction,
+ignore only disabling caused by `while-submitting`; ordinary disabling and
+other eligibility rules remain in force.
+
+Native completion, ordinary registration windows, overlapping attempts and the
+validation-to-payload boundary must be resolved before this becomes normative.
 
 ## Incubation and/or standardization destination
 
